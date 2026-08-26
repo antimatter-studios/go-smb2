@@ -12,11 +12,11 @@ import (
 	"fmt"
 	"hash"
 
-	"github.com/hirochachacha/go-smb2/internal/crypto/ccm"
-	"github.com/hirochachacha/go-smb2/internal/crypto/cmac"
+	"github.com/antimatter-studios/go-smb2/internal/crypto/ccm"
+	"github.com/antimatter-studios/go-smb2/internal/crypto/cmac"
 
-	. "github.com/hirochachacha/go-smb2/internal/erref"
-	. "github.com/hirochachacha/go-smb2/internal/smb2"
+	. "github.com/antimatter-studios/go-smb2/internal/erref"
+	. "github.com/antimatter-studios/go-smb2/internal/smb2"
 )
 
 func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error) {

@@ -3,8 +3,8 @@ package smb2
 import (
 	"encoding/asn1"
 
-	"github.com/hirochachacha/go-smb2/internal/ntlm"
-	"github.com/hirochachacha/go-smb2/internal/spnego"
+	"github.com/antimatter-studios/go-smb2/internal/ntlm"
+	"github.com/antimatter-studios/go-smb2/internal/spnego"
 )
 
 type Initiator interface {
