@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "these files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+
+  test-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.19', '1.22', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Start Samba
+        run: |
+          docker build -t go-smb2-samba:test .github/docker
+          docker run -d --name go-smb2-samba -p 445:445 go-smb2-samba:test
+          cp ./.github/client_conf.json ./
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 445; then exit 0; fi
+            sleep 1
+          done
+          echo "samba did not come up"
+          docker logs go-smb2-samba
+          exit 1
+      - name: Test
+        run: go test -race -count=1 ./...
+      - name: Samba logs on failure
+        if: failure()
+        run: docker logs go-smb2-samba
+
+  # The Windows job talks to a real Windows SMB server, which is the only way
+  # to cover server behaviour Samba does not reproduce.
+  test-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ['1.22', 'stable']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - name: Create shares
+        shell: cmd
+        run: |
+          mkdir C:\tmp
+          net user smbuser Smbpasswd12345 /add
+          net share tmp="C:\tmp" /GRANT:smbuser,full
+          net share tmp2="C:\tmp" /GRANT:smbuser,read
+      - name: Test
+        run: |
+          cp ./.github/client_conf.json ./
+          go test -race -count=1 ./...
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Start Samba
+        run: |
+          docker build -t go-smb2-samba:test .github/docker
+          docker run -d --name go-smb2-samba -p 445:445 go-smb2-samba:test
+          cp ./.github/client_conf.json ./
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 445; then exit 0; fi
+            sleep 1
+          done
+          echo "samba did not come up"
+          docker logs go-smb2-samba
+          exit 1
+      - name: Coverage
+        run: |
+          go test -count=1 -covermode=atomic -coverprofile=coverage.out -coverpkg=./... ./...
+          go tool cover -func=coverage.out | tail -1
+      - name: Enforce minimum
+        run: make cover-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
