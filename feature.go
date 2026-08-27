@@ -1,7 +1,7 @@
 package smb2
 
 import (
-	. "github.com/antimatter-studios/go-smb2/internal/smb2"
+	. "github.com/antimatter-studios/go-smb2-hirochachacha/internal/smb2"
 )
 
 // client

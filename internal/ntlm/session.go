@@ -5,7 +5,7 @@ import (
 	"crypto/rc4"
 	"errors"
 
-	"github.com/antimatter-studios/go-smb2/internal/utf16le"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/utf16le"
 )
 
 type Session struct {

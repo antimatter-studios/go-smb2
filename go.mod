@@ -1,4 +1,4 @@
-module github.com/antimatter-studios/go-smb2
+module github.com/antimatter-studios/go-smb2-hirochachacha
 
 go 1.12
 

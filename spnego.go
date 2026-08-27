@@ -3,7 +3,7 @@ package smb2
 import (
 	"encoding/asn1"
 
-	"github.com/antimatter-studios/go-smb2/internal/spnego"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/spnego"
 )
 
 type spnegoClient struct {
