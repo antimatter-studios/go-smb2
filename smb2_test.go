@@ -1211,3 +1211,89 @@ func TestGlobReportsIOError(t *testing.T) {
 		t.Error("expected an error for a pattern with no metacharacters")
 	}
 }
+
+// Bounding the dialects must still produce a working session against a real
+// server, not merely a well-formed request.
+func TestDialectBounds(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+
+	tests := []struct {
+		name string
+		min  uint16
+		max  uint16
+	}{
+		{"floor at SMB 3.0.0", smb2.SMB300, 0},
+		{"ceiling at SMB 2.1", 0, smb2.SMB210},
+		{"pinned to SMB 3.1.1 by an equal floor and ceiling", smb2.SMB311, smb2.SMB311},
+		// SMB 2.0.2 is the oldest dialect the client offers and the one
+		// whose session setup differs most from the rest.
+		{"pinned to SMB 2.0.2 by an equal floor and ceiling", smb2.SMB202, smb2.SMB202},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &smb2.Dialer{
+				MaxCreditBalance: cfg.MaxCreditBalance,
+				Negotiator: smb2.Negotiator{
+					RequireMessageSigning: cfg.Conn.RequireMessageSigning,
+					MinDialect:            tt.min,
+					MaxDialect:            tt.max,
+				},
+				Initiator: &smb2.NTLMInitiator{
+					User:        cfg.Session.User,
+					Password:    cfg.Session.Password,
+					Domain:      cfg.Session.Domain,
+					Workstation: cfg.Session.Workstation,
+					TargetSPN:   cfg.Session.TargetSPN,
+				},
+			}
+
+			s, err := d.Dial(context.Background(), fmt.Sprintf("%s:%d", cfg.Transport.Host, cfg.Transport.Port))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = s.Logoff()
+			}()
+
+			share, err := s.Mount(fsName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_ = share.Umount()
+			}()
+
+			if _, err := share.ReadDir("."); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A range no dialect falls into is a caller mistake, and must be reported
+// rather than silently negotiated as something else.
+func TestDialectBoundsReject(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+
+	d := &smb2.Dialer{
+		Negotiator: smb2.Negotiator{
+			MinDialect: smb2.SMB311,
+			MaxDialect: smb2.SMB202,
+		},
+		Initiator: &smb2.NTLMInitiator{
+			User:     cfg.Session.User,
+			Password: cfg.Session.Password,
+		},
+	}
+
+	s, err := d.Dial(context.Background(), fmt.Sprintf("%s:%d", cfg.Transport.Host, cfg.Transport.Port))
+	if err == nil {
+		_ = s.Logoff()
+		t.Fatal("expected an inverted dialect range to be rejected")
+	}
+}
