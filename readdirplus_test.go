@@ -58,7 +58,6 @@ func TestReaddirPlusBatchFailureErrorShape(t *testing.T) {
 		}
 		require.Equal(secErr, e.Err, "every entry carries the same batch error")
 		require.Nil(e.RawSecurityDescriptor, "no per-entry bytes exist when the batch failed")
-		require.Nil(e.SecurityDescriptor)
 	}
 
 	// The read loop still terminates: the drained handle reports io.EOF rather

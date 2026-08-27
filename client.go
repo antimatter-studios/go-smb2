@@ -19,7 +19,6 @@ import (
 	"github.com/cloudsoda/go-smb2/internal/msrpc"
 	"github.com/cloudsoda/go-smb2/internal/smb2"
 	"github.com/cloudsoda/go-smb2/internal/utf16le"
-	"github.com/cloudsoda/sddl"
 )
 
 // SecurityInformationRequestFlags the data that is expected to be returned in Security Information
@@ -36,20 +35,17 @@ const (
 	SACLSecurityInformation SecurityInformationRequestFlags = 0x00000008
 )
 
+// SecurityDescriptorEncoder carries a self-relative SECURITY_DESCRIPTOR blob
+// for SetSecurityInfoRaw.
 type SecurityDescriptorEncoder struct {
-	*sddl.SecurityDescriptor
+	Raw []byte
 }
+
+func (e *SecurityDescriptorEncoder) Size() int { return len(e.Raw) }
+
+func (e *SecurityDescriptorEncoder) Encode(p []byte) { copy(p, e.Raw) }
 
 var _ smb2.Encoder = (*SecurityDescriptorEncoder)(nil)
-
-func (se *SecurityDescriptorEncoder) Encode(dest []byte) {
-	data := se.Binary()
-	copy(dest, data)
-}
-
-func (se *SecurityDescriptorEncoder) Size() int {
-	return len(se.Binary())
-}
 
 // Dialer contains options for func (*Dialer) Dial.
 type Dialer struct {
@@ -1028,21 +1024,6 @@ func (fs *Share) Statfs(name string) (FileFsInfo, error) {
 	return fi, nil
 }
 
-// SecurityInfo returns the security descriptor of a file
-func (fs *Share) SecurityInfo(name string, info SecurityInformationRequestFlags) (*sddl.SecurityDescriptor, error) {
-	data, err := fs.SecurityInfoRaw(name, info)
-	if err != nil {
-		return nil, err
-	}
-
-	sd, err := sddl.FromBinary(data)
-	if err != nil {
-		return nil, fmt.Errorf("parsing binary representation of security descriptor: %w", err)
-	}
-
-	return sd, nil
-}
-
 // SecurityInfoRaw returns the raw security descriptor of a file as a byte array
 func (fs *Share) SecurityInfoRaw(name string, info SecurityInformationRequestFlags) ([]byte, error) {
 	const op = "secinfo"
@@ -1094,10 +1075,6 @@ func (fs *Share) SecurityInfoRaw(name string, info SecurityInformationRequestFla
 	defer f.Close()
 
 	return f.SecurityInfoRaw(info)
-}
-
-func (fs *Share) SetSecurityInfo(name string, flags SecurityInformationRequestFlags, sd *sddl.SecurityDescriptor) error {
-	return fs.SetSecurityInfoRaw(name, flags, &SecurityDescriptorEncoder{sd})
 }
 
 func (fs *Share) SetSecurityInfoRaw(name string, flags SecurityInformationRequestFlags, sd smb2.Encoder) error {
@@ -1583,7 +1560,6 @@ func (f *File) ReaddirPlus(n int, securityInfo SecurityInformationRequestFlags) 
 
 	entries := make([]DirEntryPlus, 0, len(fi))
 	for i, info := range fi {
-		var sd *sddl.SecurityDescriptor
 		var err error
 		// Clone: secResults[i].data is a subslice of a pooled receive buffer, so
 		// after that buffer is recycled a data hazard is introduced.
@@ -1593,19 +1569,9 @@ func (f *File) ReaddirPlus(n int, securityInfo SecurityInformationRequestFlags) 
 				continue // file deleted between Readdir and security query
 			}
 			err = secResults[i].err
-		} else if raw != nil {
-			var parseErr error
-			sd, parseErr = sddl.FromBinary(raw)
-			if parseErr != nil {
-				// Retain raw even on parse failure: a caller consuming the
-				// native OS representation may still succeed with these bytes.
-				sd = nil // belt-and-suspenders assignment
-				err = fmt.Errorf("parsing security descriptor for %s: %w", info.Name(), parseErr)
-			}
 		}
 		entries = append(entries, DirEntryPlus{
 			FileInfo:              info,
-			SecurityDescriptor:    sd,
 			RawSecurityDescriptor: raw,
 			Err:                   err,
 		})
@@ -2323,20 +2289,6 @@ func (f *File) queryInfo(req *smb2.QueryInfoRequest) (infoBytes []byte, err erro
 	return r.OutputBuffer(), nil
 }
 
-func (f *File) SecurityInfo(flags SecurityInformationRequestFlags) (*sddl.SecurityDescriptor, error) {
-	data, err := f.SecurityInfoRaw(flags)
-	if err != nil {
-		return nil, err
-	}
-
-	sd, err := sddl.FromBinary(data)
-	if err != nil {
-		return nil, fmt.Errorf("parsing binary representation of security descriptor: %w", err)
-	}
-
-	return sd, nil
-}
-
 // SecurityInfoRaw returns the raw security descriptor of the file as a byte array
 func (f *File) SecurityInfoRaw(info SecurityInformationRequestFlags) ([]byte, error) {
 	op := "secinfo"
@@ -2355,10 +2307,6 @@ func (f *File) SecurityInfoRaw(info SecurityInformationRequestFlags) ([]byte, er
 	// Clone: infoBytes is a subslice of a pooled receive buffer, so after that
 	// buffer is recycled a data hazard is introduced.
 	return bytes.Clone(infoBytes), nil
-}
-
-func (f *File) SetSecurityInfo(flags SecurityInformationRequestFlags, sd *sddl.SecurityDescriptor) error {
-	return f.SetSecurityInfoRaw(flags, &SecurityDescriptorEncoder{sd})
 }
 
 func (f *File) SetSecurityInfoRaw(flags SecurityInformationRequestFlags, sd smb2.Encoder) error {
@@ -2489,10 +2437,10 @@ func (fs *FileStat) Sys() any {
 // compound requests. It implements fs.DirEntry.
 type DirEntryPlus struct {
 	os.FileInfo
-	SecurityDescriptor *sddl.SecurityDescriptor
 
 	// RawSecurityDescriptor is the security descriptor exactly as returned on
-	// the wire: a self-relative SECURITY_DESCRIPTOR blob.
+	// the wire: a self-relative SECURITY_DESCRIPTOR blob. Parsing it is the
+	// caller's to do, with whichever library they prefer.
 	RawSecurityDescriptor []byte
 
 	Err error // non-nil if the security query failed for this entry
