@@ -3,7 +3,7 @@ package smb2
 import (
 	"testing"
 
-	"github.com/cloudsoda/go-smb2/internal/utf16le"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/utf16le"
 )
 
 // Every decoder here guards its accessors with IsInvalid. These targets hold

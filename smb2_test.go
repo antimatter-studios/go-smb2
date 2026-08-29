@@ -934,13 +934,18 @@ func TestSecurityDescriptor(t *testing.T) {
 	}()
 
 	flags := smb2.OwnerSecurityInformation | smb2.GroupSecurityInformation | smb2.DACLSecurityInformation
-	sd, err := f.SecurityInfo(flags)
+	raw, err := f.SecurityInfoRaw(flags)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if sd == nil {
-		t.Error("unexpected nil SD")
+	// A self-relative SECURITY_DESCRIPTOR is at least its own 20-byte header,
+	// and its first byte is the revision.
+	if len(raw) < 20 {
+		t.Errorf("security descriptor is %d bytes, too short to be one", len(raw))
+	}
+	if raw[0] != 1 {
+		t.Errorf("security descriptor revision %d, want 1", raw[0])
 	}
 }
 
@@ -1045,8 +1050,8 @@ func TestReaddirPlus(t *testing.T) {
 				t.Errorf("entry %s: unexpected error: %v", e.Name(), e.Err)
 				continue
 			}
-			if e.SecurityDescriptor == nil {
-				t.Errorf("entry %s: expected non-nil SecurityDescriptor", e.Name())
+			if len(e.RawSecurityDescriptor) == 0 {
+				t.Errorf("entry %s: expected a security descriptor", e.Name())
 			}
 			if e.IsDir() {
 				t.Errorf("entry %s: expected file, got directory", e.Name())
@@ -1092,8 +1097,8 @@ func TestReaddirPlus(t *testing.T) {
 			if e.Err != nil {
 				t.Errorf("entry %s: unexpected error: %v", e.Name(), e.Err)
 			}
-			if e.SecurityDescriptor == nil {
-				t.Errorf("entry %s: expected non-nil SecurityDescriptor", e.Name())
+			if len(e.RawSecurityDescriptor) == 0 {
+				t.Errorf("entry %s: expected a security descriptor", e.Name())
 			}
 		}
 	})
@@ -1121,8 +1126,8 @@ func TestReaddirPlus(t *testing.T) {
 				t.Errorf("entry %s: unexpected error: %v", name, entries[i].Err)
 				continue
 			}
-			if entries[i].SecurityDescriptor == nil {
-				t.Errorf("entry %s: expected non-nil SecurityDescriptor", name)
+			if len(entries[i].RawSecurityDescriptor) == 0 {
+				t.Errorf("entry %s: expected a security descriptor", name)
 			}
 		}
 	})

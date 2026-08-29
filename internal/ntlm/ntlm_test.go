@@ -304,6 +304,31 @@ func TestClientSendEmptyDomain(t *testing.T) {
 
 			s := NewServer("server")
 			s.AddAccount("user", "password")
+
+			nmsg, err := c.Negotiate()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmsg, err := s.Challenge(nmsg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			amsg, err := c.Authenticate(cmsg)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if got := domainOf(t, amsg); got != tt.want {
+				t.Errorf("domain sent: %q, want %q", got, tt.want)
+			}
+
+			if err := s.Authenticate(amsg); err != nil {
+				t.Errorf("server rejected the authentication: %v", err)
+			}
+		})
+	}
+}
+
 // buildChallenge assembles a CHALLENGE message with the given flags, target
 // name and target info, so a server that omits either can be reproduced
 // without one.
@@ -366,21 +391,6 @@ func TestChallengeWithoutOptionalFlags(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			cmsg, err := s.Challenge(nmsg)
-			if err != nil {
-				t.Fatal(err)
-			}
-			amsg, err := c.Authenticate(cmsg)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			if got := domainOf(t, amsg); got != tt.want {
-				t.Errorf("domain sent: %q, want %q", got, tt.want)
-			}
-
-			if err := s.Authenticate(amsg); err != nil {
-				t.Errorf("server rejected the authentication: %v", err)
 
 			cmsg := buildChallenge(tt.flags, targetName, targetInfo)
 
