@@ -1,9 +1,12 @@
 package smb2
 
+import "crypto/rand"
+
 // ----------------------------------------------------------------------------
 // SMB2 Packet Header
 //
 
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/fb188936-5050-48d3-b350-dc43059638a4
 type PacketHeader struct {
 	CreditCharge          uint16
 	ChannelSequence       uint16
@@ -264,12 +267,14 @@ func (p TransformCodec) SetSignature(bs []byte) {
 	copy(p[4:20], bs)
 }
 
-func (p TransformCodec) Nonce() []byte {
-	return p[20:36]
+func (p TransformCodec) Nonce(size int) []byte {
+	return p[20 : 20+size]
 }
 
-func (p TransformCodec) SetNonce(bs []byte) {
-	copy(p[20:36], bs)
+func (p TransformCodec) GenerateNonce(size int) error {
+	// Caller must ensure the buffer is freshly allocated so bytes [20+size:36] are zero per the SMB2 spec.
+	_, err := rand.Read(p[20 : 20+size])
+	return err
 }
 
 func (p TransformCodec) OriginalMessageSize() uint32 {

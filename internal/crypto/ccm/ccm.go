@@ -142,32 +142,32 @@ func (ccm *ccm) getTag(Ctr, data, plaintext []byte) []byte {
 	if len(data) > 0 {
 		B[0] |= 1 << 6 // Adata
 
-		ccm.mac.Write(B)
+		_, _ = ccm.mac.Write(B)
 
 		if len(data) < (1<<15 - 1<<7) {
 			putUvarint(B[:2], uint64(len(data)))
 
-			ccm.mac.Write(B[:2])
+			_, _ = ccm.mac.Write(B[:2])
 		} else if len(data) <= 1<<31-1 {
 			B[0] = 0xff
 			B[1] = 0xfe
 			putUvarint(B[2:6], uint64(len(data)))
 
-			ccm.mac.Write(B[:6])
+			_, _ = ccm.mac.Write(B[:6])
 		} else {
 			B[0] = 0xff
 			B[1] = 0xff
 			putUvarint(B[2:10], uint64(len(data)))
 
-			ccm.mac.Write(B[:10])
+			_, _ = ccm.mac.Write(B[:10])
 		}
-		ccm.mac.Write(data)
+		_, _ = ccm.mac.Write(data)
 		ccm.mac.PadZero()
 	} else {
-		ccm.mac.Write(B)
+		_, _ = ccm.mac.Write(B)
 	}
 
-	ccm.mac.Write(plaintext)
+	_, _ = ccm.mac.Write(plaintext)
 	ccm.mac.PadZero()
 
 	return ccm.mac.Sum(nil)
@@ -179,7 +179,7 @@ func maxUvarint(n int) uint64 {
 
 // put uint64 as big endian.
 func putUvarint(bs []byte, u uint64) {
-	for i := 0; i < len(bs); i++ {
+	for i := range bs {
 		bs[i] = byte(u >> uint(8*(len(bs)-1-i)))
 	}
 }

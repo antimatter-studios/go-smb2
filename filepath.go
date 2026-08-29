@@ -39,7 +39,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	. "github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
 )
 
 // ErrBadPattern indicates a pattern was malformed.
@@ -325,10 +325,10 @@ L:
 		}
 		if err != nil {
 			if err, ok := err.(*ResponseError); ok {
-				switch NtStatus(err.Code) {
-				case STATUS_NO_SUCH_FILE:
+				switch erref.NtStatus(err.Code) {
+				case erref.STATUS_NO_SUCH_FILE:
 					return []string{}, nil
-				case STATUS_NO_MORE_FILES:
+				case erref.STATUS_NO_MORE_FILES:
 					break L
 				}
 			}

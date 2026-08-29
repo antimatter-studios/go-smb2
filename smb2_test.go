@@ -3,23 +3,20 @@
 package smb2_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
-	"strconv"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/antimatter-studios/go-smb2-hirochachacha"
-
-	"testing"
+	"github.com/stretchr/testify/require"
 )
 
 func join(ss ...string) string {
@@ -55,16 +52,24 @@ type treeConnConfig struct {
 type config struct {
 	MaxCreditBalance uint16          `json:"max_credit_balance"`
 	Transport        transportConfig `json:"transport"`
-	Conn             connConfig      `json:"conn,omitempty"`
-	Session          sessionConfig   `json:"session,omitempty"`
+	Conn             connConfig      `json:"conn"`
+	Session          sessionConfig   `json:"session"`
 	TreeConn         treeConnConfig  `json:"tree_conn"`
 }
 
-var cfg config
-var fs *smb2.Share
-var rfs *smb2.Share
-var session *smb2.Session
-var dialer *smb2.Dialer
+var (
+	cfg     config
+	fs      *smb2.Share
+	fsName  string
+	rfs     *smb2.Share
+	rfsName string
+
+	// services for mac ()
+	sfmFS   *smb2.Share
+	sfuFS   *smb2.Share
+	session *smb2.Session
+	dialer  *smb2.Dialer
+)
 
 func connect(f func()) {
 	{
@@ -85,12 +90,6 @@ func connect(f func()) {
 			goto NO_CONNECTION
 		}
 
-		conn, err := net.Dial(cfg.Transport.Type, net.JoinHostPort(cfg.Transport.Host, strconv.Itoa(cfg.Transport.Port)))
-		if err != nil {
-			panic(err)
-		}
-		defer conn.Close()
-
 		if cfg.Session.Type != "ntlm" {
 			panic("unsupported session type")
 		}
@@ -110,23 +109,47 @@ func connect(f func()) {
 			},
 		}
 
-		c, err := dialer.Dial(conn)
+		c, err := dialer.Dial(context.Background(), fmt.Sprintf("%s:%d", cfg.Transport.Host, cfg.Transport.Port))
 		if err != nil {
 			panic(err)
 		}
-		defer c.Logoff()
+		defer func() {
+			_ = c.Logoff()
+		}()
 
-		fs1, err := c.Mount(cfg.TreeConn.Share1)
+		fsName = cfg.TreeConn.Share1
+		fs1, err := c.Mount(fsName)
 		if err != nil {
 			panic(err)
 		}
-		defer fs1.Umount()
+		defer func() {
+			_ = fs1.Umount()
+		}()
 
-		fs2, err := c.Mount(cfg.TreeConn.Share2)
+		rfsName = cfg.TreeConn.Share2
+		fs2, err := c.Mount(rfsName)
 		if err != nil {
 			panic(err)
 		}
-		defer fs2.Umount()
+		defer func() {
+			_ = fs2.Umount()
+		}()
+
+		sfmFS, err = c.Mount(fsName, smb2.WithMapPosix())
+		if err != nil {
+			panic(err)
+		}
+		defer func() {
+			_ = sfmFS.Umount()
+		}()
+
+		sfuFS, err = c.Mount(fsName, smb2.WithMapChars())
+		if err != nil {
+			panic(err)
+		}
+		defer func() {
+			_ = sfuFS.Umount()
+		}()
 
 		fs = fs1
 		rfs = fs2
@@ -144,6 +167,106 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestSFMMount(t *testing.T) {
+	if sfmFS == nil {
+		t.Skip()
+	}
+
+	testDir := fmt.Sprintf("testDir-%d-TestSFMMount", os.Getpid())
+	err := sfmFS.Mkdir(testDir, 0755)
+	require.NoError(t, err)
+	defer func() {
+		_ = sfmFS.RemoveAll(testDir)
+	}()
+
+	reservedChars := []string{`"`, `*`, `:`, `<`, `>`, `?`, `|`, `.`, ` `}
+
+	t.Run("files with a reserved characters", func(t *testing.T) {
+		// create a file with each reserved character
+		for _, rc := range reservedChars {
+			data := []byte("bytes in the file" + rc)
+			name := "file-" + rc
+			err := sfmFS.WriteFile(join(testDir, name), data, 0644)
+			require.NoError(t, err)
+
+			// read it back
+			actual, err := sfmFS.ReadFile(join(testDir, name))
+			require.NoError(t, err)
+			require.Equal(t, data, actual)
+		}
+	})
+
+	t.Run("directories with a reserved character", func(t *testing.T) {
+		// create a directory with each reserved character
+		for _, rc := range reservedChars {
+			name := "dir-" + rc
+			// create the oddly named directory with a sub directory
+			err := sfmFS.MkdirAll(join(testDir, name, "subdir"), 0755)
+			require.NoError(t, err)
+
+			// list the contents of the oddly naed directory
+			f, err := sfmFS.Open(join(testDir, name))
+			require.NoError(t, err)
+			defer f.Close()
+
+			infos, err := f.Readdir(-1)
+			require.NoError(t, err)
+			require.Len(t, infos, 1)
+			require.Equal(t, "subdir", infos[0].Name())
+		}
+	})
+}
+
+func TestSFUMount(t *testing.T) {
+	if sfuFS == nil {
+		t.Skip()
+	}
+
+	testDir := fmt.Sprintf("testDir-%d-TestSFUMount", os.Getpid())
+	err := sfuFS.Mkdir(testDir, 0755)
+	require.NoError(t, err)
+	defer func() {
+		_ = sfuFS.RemoveAll(testDir)
+	}()
+
+	reservedChars := []string{`*`, `?`, `:`, `>`, `<`, `|`}
+
+	t.Run("files with a reserved characters", func(t *testing.T) {
+		// create a file with each reserved character
+		for _, rc := range reservedChars {
+			data := []byte("bytes in the file" + rc)
+			name := "file-" + rc
+			err := sfuFS.WriteFile(join(testDir, name), data, 0644)
+			require.NoError(t, err)
+
+			// read it back
+			actual, err := sfuFS.ReadFile(join(testDir, name))
+			require.NoError(t, err)
+			require.Equal(t, data, actual)
+		}
+	})
+
+	t.Run("directories with a reserved character", func(t *testing.T) {
+		// create a directory with each reserved character
+		for _, rc := range reservedChars {
+			name := "dir-" + rc
+			// create the oddly named directory with a sub directory
+			err := sfuFS.MkdirAll(join(testDir, name, "subdir"), 0755)
+			require.NoError(t, err)
+
+			// list the contents of the oddly naed directory
+			f, err := sfuFS.Open(join(testDir, name))
+			require.NoError(t, err)
+			defer f.Close()
+
+			infos, err := f.Readdir(-1)
+			require.NoError(t, err)
+			require.Len(t, infos, 1)
+			require.Equal(t, "subdir", infos[0].Name())
+		}
+	})
+}
+
 func TestReaddir(t *testing.T) {
 	if fs == nil {
 		t.Skip()
@@ -153,7 +276,9 @@ func TestReaddir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	d, err := fs.Open(testDir)
 	if err != nil {
@@ -173,14 +298,18 @@ func TestReaddir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.Remove(testDir + `\testFile`)
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\testFile`)
+	}()
 
 	d2, err := fs.Open(testDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer d2.Close()
+	defer func() {
+		_ = d2.Close()
+	}()
 
 	fi2, err := d2.Readdir(-1)
 	if err != nil {
@@ -191,9 +320,8 @@ func TestReaddir(t *testing.T) {
 	}
 
 	fi2, err = d2.Readdir(1)
-	if err != io.EOF {
-		t.Error("unexpected error: ", err)
-	}
+	require.Equal(t, io.EOF, err)
+	require.Empty(t, fi2)
 }
 
 func TestFile(t *testing.T) {
@@ -205,14 +333,18 @@ func TestFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	f, err := fs.Create(testDir + `\testFile`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.Remove(testDir + `\testFile`)
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\testFile`)
+	}()
 
 	if f.Name() != testDir+`\testFile` {
 		t.Error("unexpected name:", f.Name())
@@ -277,7 +409,7 @@ func TestFile(t *testing.T) {
 		t.Error("should be not a directory")
 	}
 
-	f.Truncate(4)
+	_ = f.Truncate(4)
 
 	n64, err = f.Seek(-3, io.SeekEnd)
 	if err != nil {
@@ -311,14 +443,18 @@ func TestSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	f, err := fs.Create(testDir + `\testFile`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.Remove(testDir + `\testFile`)
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\testFile`)
+	}()
 
 	_, err = f.Write([]byte("testContent"))
 	if err != nil {
@@ -331,7 +467,9 @@ func TestSymlink(t *testing.T) {
 		if err != nil {
 			t.Skip("samba doesn't support reparse point")
 		}
-		defer fs.Remove(testDir + `\linkToTestFile`)
+		defer func() {
+			_ = fs.Remove(testDir + `\linkToTestFile`)
+		}()
 
 		stat, err := fs.Lstat(testDir + `\linkToTestFile`)
 		if err != nil {
@@ -357,7 +495,7 @@ func TestSymlink(t *testing.T) {
 
 		f, err = fs.Open(testDir + `\linkToTestFile`)
 		if err == nil { // if it supports follow-symlink
-			bs, err := ioutil.ReadAll(f)
+			bs, err := io.ReadAll(f)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,14 +515,18 @@ func TestIsXXX(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	f, err := fs.Create(testDir + `\Exist`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.Remove(testDir + `\Exist`)
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\Exist`)
+	}()
 
 	_, err = fs.OpenFile(testDir+`\Exist`, os.O_CREATE|os.O_EXCL, 0666)
 	if !os.IsExist(err) {
@@ -449,50 +591,56 @@ func TestRename(t *testing.T) {
 	}
 	testDir := fmt.Sprintf("testDir-%d-TestRename", os.Getpid())
 	err := fs.Mkdir(testDir, 0755)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fs.RemoveAll(testDir)
+	require.NoError(t, err)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
-	f, err := fs.Create(testDir + `\old`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = f.Write([]byte("testContent"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	err = f.Close()
-	if err != nil {
-		fs.Remove(testDir + `\old`)
+	t.Run("move", func(t *testing.T) {
+		f, err := fs.Create(testDir + `\old`)
+		require.NoError(t, err)
+		data := []byte("testContent")
+		_, err = f.Write(data)
+		require.NoError(t, err)
+		err = f.Close()
+		require.NoError(t, err)
 
-		t.Fatal(err)
-	}
+		err = fs.Rename(testDir+`\old`, testDir+`\new`)
+		require.NoError(t, err)
 
-	err = fs.Rename(testDir+`\old`, testDir+`\new`)
-	if err != nil {
-		fs.Remove(testDir + `\old`)
+		_, err = fs.Stat(testDir + `\old`)
+		require.ErrorIs(t, err, os.ErrNotExist)
 
-		t.Fatal(err)
-	}
-	defer fs.Remove(testDir + `\new`)
+		f, err = fs.Open(testDir + `\new`)
+		require.NoError(t, err)
+		defer f.Close()
+		actualData, err := io.ReadAll(f)
+		require.NoError(t, err)
+		require.Equal(t, data, actualData)
+	})
 
-	_, err = fs.Stat(testDir + `\old`)
-	if os.IsExist(err) {
-		t.Error("unexpected error:", err)
-	}
-	f, err = fs.Open(testDir + `\new`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	bs, err := ioutil.ReadAll(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(bs) != "testContent" {
-		t.Error("unexpected content:", string(bs))
-	}
+	t.Run("move and overwrite", func(t *testing.T) {
+		data := []byte("the final data")
+		oldName := ".sourceFile"
+		newName := "destinationFile"
+		err := fs.WriteFile(join(testDir, oldName), data, 0644)
+		require.NoError(t, err)
+
+		err = fs.WriteFile(join(testDir, newName), []byte("doesn't matter"), 0644)
+		require.NoError(t, err)
+
+		err = fs.Rename(join(testDir, oldName), join(testDir, newName))
+		require.NoError(t, err)
+
+		// make sure there is no file at the old path, and that old data is in the new path
+		info, err := fs.Stat(join(testDir, oldName))
+		require.ErrorIs(t, err, os.ErrNotExist)
+		require.Nil(t, info)
+
+		actualData, err := fs.ReadFile(join(testDir, newName))
+		require.NoError(t, err)
+		require.Equal(t, data, actualData)
+	})
 }
 
 func TestChtimes(t *testing.T) {
@@ -504,7 +652,9 @@ func TestChtimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	f, err := fs.Create(testDir + `\testFile`)
 	if err != nil {
@@ -512,8 +662,7 @@ func TestChtimes(t *testing.T) {
 	}
 	err = f.Close()
 	if err != nil {
-		fs.Remove(testDir + `\testFile`)
-
+		_ = fs.Remove(testDir + `\testFile`)
 		t.Fatal(err)
 	}
 
@@ -550,14 +699,18 @@ func TestChmod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	f, err := fs.Create(testDir + `\testFile`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.Remove(testDir + `\testFile`)
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\testFile`)
+	}()
 
 	stat, err := f.Stat()
 	if err != nil {
@@ -588,14 +741,8 @@ func TestListSharenames(t *testing.T) {
 		t.Fatal(err)
 	}
 	sort.Strings(names)
-	for _, expected := range []string{"IPC$", "tmp", "tmp2"} {
-		found := false
-		for _, name := range names {
-			if name == expected {
-				found = true
-				break
-			}
-		}
+	for _, expected := range []string{fsName, rfsName} {
+		found := slices.Contains(names, expected)
 		if !found {
 			t.Errorf("couldn't find share name %s in %v", expected, names)
 		}
@@ -612,7 +759,9 @@ func TestServerSideCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	err = fs.WriteFile(join(testDir, "src.txt"), []byte("hello world!"), 0666)
 	if err != nil {
@@ -673,137 +822,6 @@ func TestRemoveAll(t *testing.T) {
 	}
 }
 
-func TestContextError(t *testing.T) {
-	if session == nil {
-		t.Skip()
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	s := session.WithContext(ctx)
-	fs := fs.WithContext(ctx)
-	f, err := fs.Open(".")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	cancel()
-
-	checkError1 := func(op string, err error) {
-		if err == nil || err.(*smb2.ContextError).Err != context.Canceled {
-			t.Errorf("unexpected context handling: op=%s, type=%T, value=%v", op, err, err)
-		}
-	}
-
-	checkError2 := func(op string, err error) {
-		switch e := err.(type) {
-		case *os.PathError:
-			err = e.Err.(*smb2.ContextError).Err
-			if err != context.Canceled {
-				t.Errorf("unexpected context handling: op=%s, type=%T, value=%v", op, err, err)
-			}
-		case *os.LinkError:
-			err = e.Err.(*smb2.ContextError).Err
-			if err != context.Canceled {
-				t.Errorf("unexpected context handling: op=%s, type=%T, value=%v", op, err, err)
-			}
-		default:
-			t.Errorf("unexpected context handling: op=%s, type=%T, value=%v", op, err, err)
-		}
-	}
-
-	conn, err := net.Dial(cfg.Transport.Type, net.JoinHostPort(cfg.Transport.Host, strconv.Itoa(cfg.Transport.Port)))
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
-	_, err = dialer.DialContext(ctx, conn)
-	checkError1("dialcontext", err)
-
-	_, err = s.Mount("somewhere")
-	checkError1("mount", err)
-	_, err = s.ListSharenames()
-	checkError1("listsharename", err)
-	err = s.Logoff()
-	checkError1("logoff", err)
-
-	err = fs.Chmod("aaa", 0)
-	checkError2("chmod", err)
-	err = fs.Chtimes("aaa", time.Time{}, time.Time{})
-	checkError2("chtimes", err)
-	_, err = fs.Create("aaa")
-	checkError2("create", err)
-	_, err = fs.Lstat("aaa")
-	checkError2("lstat", err)
-	err = fs.Mkdir("aaa", 0)
-	checkError2("mkdir", err)
-	err = fs.MkdirAll("aaa", 0)
-	checkError2("mkdirall", err)
-	_, err = fs.Open("aaa")
-	checkError2("open", err)
-	_, err = fs.OpenFile("aaa", 0, 0)
-	checkError2("openfile", err)
-	_, err = fs.ReadDir("aaa")
-	checkError2("readdir", err)
-	_, err = fs.ReadFile("aaa")
-	checkError2("readfile", err)
-	_, err = fs.Readlink("aaa")
-	checkError2("readlink", err)
-	err = fs.Remove("aaa")
-	checkError2("remove", err)
-	err = fs.RemoveAll("aaa")
-	checkError2("removeall", err)
-	err = fs.Rename("aaa", "bbb")
-	checkError2("rename", err)
-	_, err = fs.Stat("aaa")
-	checkError2("stat", err)
-	_, err = fs.Statfs("aaa")
-	checkError2("statfs", err)
-	err = fs.Symlink("aaa", "bbb")
-	checkError2("symlink", err)
-	err = fs.Truncate("aaa", 0)
-	checkError2("truncate", err)
-	err = fs.WriteFile("aaa", nil, 0)
-	checkError2("writefile", err)
-	err = fs.Umount()
-	checkError1("umount", err)
-
-	err = f.Chmod(0)
-	checkError2("fchmod", err)
-	_, err = f.Read(make([]byte, 10))
-	checkError2("fread", err)
-	_, err = f.ReadAt(make([]byte, 10), 0)
-	checkError2("freadat", err)
-	_, err = f.ReadFrom(strings.NewReader("aaa"))
-	checkError2("freadfrom", err)
-	_, err = f.Readdir(-1)
-	checkError2("freaddir", err)
-	_, err = f.Readdirnames(-1)
-	checkError2("freaddirnames", err)
-	_, err = f.Seek(1, io.SeekEnd)
-	checkError2("fseek", err)
-	_, err = f.Stat()
-	checkError2("fstat", err)
-	_, err = f.Statfs()
-	checkError2("fstatfs", err)
-	err = f.Sync()
-	checkError2("fsync", err)
-	err = f.Truncate(1)
-	checkError2("ftruncate", err)
-	f.Seek(0, io.SeekStart)
-	_, err = f.Write([]byte("aa"))
-	checkError2("fwrite", err)
-	_, err = f.WriteAt([]byte("aa"), 0)
-	checkError2("fwriteat", err)
-	f.Seek(0, io.SeekStart)
-	_, err = f.WriteString("aa")
-	checkError2("fwritestring", err)
-	f.Seek(0, io.SeekStart)
-	_, err = f.WriteTo(bytes.NewBufferString("aaa"))
-	checkError2("fwriteto", err)
-}
-
 func TestGlob(t *testing.T) {
 	if fs == nil {
 		t.Skip()
@@ -814,7 +832,9 @@ func TestGlob(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	for _, dir := range []string{"", "dir1", "dir2", "dir3"} {
 		if dir != "" {
@@ -880,4 +900,245 @@ func TestGlob(t *testing.T) {
 	if !reflect.DeepEqual(matches5, expected5) {
 		t.Errorf("unexpected matches: %v != %v", matches5, expected5)
 	}
+}
+
+func TestEcho(t *testing.T) {
+	if session == nil {
+		t.Skip()
+	}
+
+	require.NoError(t, session.Echo())
+}
+
+func TestSecurityDescriptor(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+	testDir := fmt.Sprintf("testDir-%d-TestFile", os.Getpid())
+	err := fs.Mkdir(testDir, 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
+
+	f, err := fs.Create(testDir + `\testFile`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		f.Close()
+		_ = fs.Remove(testDir + `\testFile`)
+	}()
+
+	flags := smb2.OwnerSecurityInformation | smb2.GroupSecurityInformation | smb2.DACLSecurityInformation
+	sd, err := f.SecurityInfo(flags)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if sd == nil {
+		t.Error("unexpected nil SD")
+	}
+}
+
+// ioReparseTagSymlink mirrors IO_REPARSE_TAG_SYMLINK. It is redeclared here
+// because internal/smb2 cannot be imported under the name this package already
+// binds to the public one.
+const ioReparseTagSymlink = uint32(0xA000000C)
+
+// TestReaddirReparsePointTag checks that a directory listing distinguishes a
+// symlink from a plain file by reparse tag, not just by the shared
+// FILE_ATTRIBUTE_REPARSE_POINT bit.
+//
+// Only symlinks are covered, because the library exposes no way to create a
+// junction. No tag-specific coverage is lost by that: the decoder returns the
+// field verbatim and never interprets the tag value.
+func TestReaddirReparsePointTag(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+
+	testDir := fmt.Sprintf("testDir-%d-TestReaddirReparsePointTag", os.Getpid())
+	require.NoError(t, fs.Mkdir(testDir, 0755))
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
+
+	f, err := fs.Create(testDir + `\plainFile`)
+	require.NoError(t, err)
+	f.Close()
+
+	if err := fs.Symlink(testDir+`\plainFile`, testDir+`\linkToPlainFile`); err != nil {
+		t.Skip("server doesn't support reparse point:", err)
+	}
+
+	d, err := fs.Open(testDir)
+	require.NoError(t, err)
+	defer d.Close()
+
+	infos, err := d.Readdir(-1)
+	require.NoError(t, err)
+
+	tags := make(map[string]uint32, len(infos))
+	for _, info := range infos {
+		st, ok := info.Sys().(*smb2.FileStat)
+		require.True(t, ok, "entry %s: expected *smb2.FileStat", info.Name())
+		tags[info.Name()] = st.ReparsePointTag
+	}
+
+	require.Contains(t, tags, "plainFile")
+	require.Contains(t, tags, "linkToPlainFile")
+	require.Equal(t, uint32(0), tags["plainFile"], "a plain file carries no reparse tag")
+	require.Equal(t, ioReparseTagSymlink, tags["linkToPlainFile"])
+}
+
+func TestReaddirPlus(t *testing.T) {
+	if fs == nil {
+		t.Skip()
+	}
+	testDir := fmt.Sprintf("testDir-%d-TestReaddirPlus", os.Getpid())
+	err := fs.Mkdir(testDir, 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
+
+	// Create enough files to exercise multi-batch incremental reads.
+	fileNames := []string{
+		"alpha.txt", "bravo.txt", "charlie.txt", "delta.txt",
+		"echo.txt", "foxtrot.txt", "golf.txt", "hotel.txt",
+		"india.txt", "juliet.txt",
+	}
+	for _, name := range fileNames {
+		f, err := fs.Create(testDir + `\` + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+	}
+
+	flags := smb2.OwnerSecurityInformation | smb2.GroupSecurityInformation | smb2.DACLSecurityInformation
+
+	t.Run("File.ReaddirPlus_all", func(t *testing.T) {
+		d, err := fs.Open(testDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+
+		entries, err := d.ReaddirPlus(-1, flags)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(entries) != len(fileNames) {
+			t.Fatalf("expected %d entries, got %d", len(fileNames), len(entries))
+		}
+
+		for _, e := range entries {
+			if e.Err != nil {
+				t.Errorf("entry %s: unexpected error: %v", e.Name(), e.Err)
+				continue
+			}
+			if e.SecurityDescriptor == nil {
+				t.Errorf("entry %s: expected non-nil SecurityDescriptor", e.Name())
+			}
+			if e.IsDir() {
+				t.Errorf("entry %s: expected file, got directory", e.Name())
+			}
+		}
+
+		// Verify EOF on subsequent call.
+		entries2, err := d.ReaddirPlus(1, flags)
+		require.Equal(t, io.EOF, err)
+		require.Empty(t, entries2)
+	})
+
+	t.Run("File.ReaddirPlus_incremental", func(t *testing.T) {
+		d, err := fs.Open(testDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+
+		var all []smb2.DirEntryPlus
+
+		// Read 3 at a time to exercise multiple batches.
+		const batchSize = 3
+		for {
+			entries, err := d.ReaddirPlus(batchSize, flags)
+			all = append(all, entries...)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) == 0 || len(entries) > batchSize {
+				t.Fatalf("expected 1-%d entries, got %d", batchSize, len(entries))
+			}
+		}
+
+		if len(all) != len(fileNames) {
+			t.Fatalf("expected %d total entries, got %d", len(fileNames), len(all))
+		}
+
+		for _, e := range all {
+			if e.Err != nil {
+				t.Errorf("entry %s: unexpected error: %v", e.Name(), e.Err)
+			}
+			if e.SecurityDescriptor == nil {
+				t.Errorf("entry %s: expected non-nil SecurityDescriptor", e.Name())
+			}
+		}
+	})
+
+	t.Run("Share.ReadDirPlus", func(t *testing.T) {
+		entries, err := fs.ReadDirPlus(testDir, flags)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(entries) != len(fileNames) {
+			t.Fatalf("expected %d entries, got %d", len(fileNames), len(entries))
+		}
+
+		// Share.ReadDirPlus sorts by name.
+		sortedNames := make([]string, len(fileNames))
+		copy(sortedNames, fileNames)
+		sort.Strings(sortedNames)
+
+		for i, name := range sortedNames {
+			if entries[i].Name() != name {
+				t.Errorf("entry %d: expected name %q, got %q", i, name, entries[i].Name())
+			}
+			if entries[i].Err != nil {
+				t.Errorf("entry %s: unexpected error: %v", name, entries[i].Err)
+				continue
+			}
+			if entries[i].SecurityDescriptor == nil {
+				t.Errorf("entry %s: expected non-nil SecurityDescriptor", name)
+			}
+		}
+	})
+
+	t.Run("empty_directory", func(t *testing.T) {
+		emptyDir := testDir + `\empty`
+		err := fs.Mkdir(emptyDir, 0755)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		entries, err := fs.ReadDirPlus(emptyDir, flags)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("expected 0 entries, got %d", len(entries))
+		}
+	})
 }

@@ -1,23 +1,23 @@
 smb2
 ====
 
-[![Build Status](https://github.com/hirochachacha/go-smb2/actions/workflows/go.yml/badge.svg)](https://github.com/hirochachacha/go-smb2/actions/workflows/go.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/hirochachacha/go-smb2.svg)](https://pkg.go.dev/github.com/hirochachacha/go-smb2)
+[![Build Status](https://github.com/cloudsoda/go-smb2/actions/workflows/go.yml/badge.svg)](https://github.com/cloudsoda/go-smb2/actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cloudsoda/go-smb2.svg)](https://pkg.go.dev/github.com/cloudsoda/go-smb2)
 
 Description
 -----------
 
-SMB2/3 client implementation.
+An SMB2/3 client implementation. This is a fork of the project [github.com/hirochachacha/go-smb2](https://github.com/hirochachacha/go-smb2). Any releases will be pre-1.0.0 for some time as features and bug fixes are implemented.
 
 Installation
 ------------
 
-`go get github.com/hirochachacha/go-smb2`
+`go get github.com/cloudsoda/go-smb2`
 
 Documentation
 -------------
 
-http://godoc.org/github.com/hirochachacha/go-smb2
+https://pkg.go.dev/github.com/cloudsoda/go-smb2
 
 Examples
 --------
@@ -31,16 +31,10 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "SERVERNAME:445")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     "USERNAME",
@@ -48,7 +42,7 @@ func main() {
 		},
 	}
 
-	s, err := d.Dial(conn)
+	s, err := d.Dial(context.Background(), "SERVERNAME:445")
 	if err != nil {
 		panic(err)
 	}
@@ -72,19 +66,12 @@ package main
 
 import (
 	"io"
-	"io/ioutil"
 	"net"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "SERVERNAME:445")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     "USERNAME",
@@ -92,7 +79,7 @@ func main() {
 		},
 	}
 
-	s, err := d.Dial(conn)
+	s, err := d.Dial(context.Background(), "SERVERNAME:445")
 	if err != nil {
 		panic(err)
 	}
@@ -121,7 +108,7 @@ func main() {
 		panic(err)
 	}
 
-	bs, err := ioutil.ReadAll(f)
+	bs, err := io.ReadAll(f)
 	if err != nil {
 		panic(err)
 	}
@@ -141,16 +128,10 @@ import (
 	"net"
 	"os"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "SERVERNAME:445")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     "USERNAME",
@@ -158,7 +139,7 @@ func main() {
 		},
 	}
 
-	s, err := d.Dial(conn)
+	s, err := d.Dial(context.Background(), "SERVERNAME:445")
 	if err != nil {
 		panic(err)
 	}
@@ -198,16 +179,10 @@ import (
 	"net"
 	iofs "io/fs"
 
-	"github.com/hirochachacha/go-smb2"
+	"github.com/cloudsoda/go-smb2"
 )
 
 func main() {
-	conn, err := net.Dial("tcp", "SERVERNAME:445")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     "USERNAME",
@@ -215,7 +190,7 @@ func main() {
 		},
 	}
 
-	s, err := d.Dial(conn)
+	s, err := d.Dial(context.Background(), "SERVERNAME:445")
 	if err != nil {
 		panic(err)
 	}
@@ -242,6 +217,55 @@ func main() {
 	})
 	if err != nil {
 		panic(err)
+	}
+}
+```
+
+### Authenticate with Kerberos
+
+> [!NOTE]
+> See [gokrb5 documentation](https://github.com/jcmturner/gokrb5/blob/master/v8/USAGE.md) for more details on how to initialize a Kerberos client.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/cloudsoda/go-smb2"
+	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/config"
+)
+
+func main() {
+	cfg, err := config.Load("/etc/krb5.conf")
+	if err != nil {
+		panic(err)
+	}
+
+	cl := client.NewWithPassword("USERNAME", "REALM", "PASSWORD", cfg)
+
+	d := &smb2.Dialer{
+		Initiator: &smb2.Krb5Initiator{
+			Client:    cl,
+			TargetSPN: "cifs/SERVERNAME",
+		},
+	}
+
+	s, err := d.Dial(context.Background(), "SERVERNAME:445")
+	if err != nil {
+		panic(err)
+	}
+	defer s.Logoff()
+
+	names, err := s.ListSharenames()
+	if err != nil {
+		panic(err)
+	}
+
+	for _, name := range names {
+		fmt.Println(name)
 	}
 }
 ```

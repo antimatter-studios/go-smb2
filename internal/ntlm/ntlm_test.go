@@ -6,16 +6,15 @@ import (
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/hex"
-
 	"testing"
 
 	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/utf16le"
 )
 
 func TestNtowfv2(t *testing.T) {
-	USER := utf16le.EncodeStringToBytes("USER")
-	password := utf16le.EncodeStringToBytes("Password")
-	domain := utf16le.EncodeStringToBytes("Domain")
+	USER := utf16le.Encode("USER", utf16le.MapCharsNone)
+	password := utf16le.Encode("Password", utf16le.MapCharsNone)
+	domain := utf16le.Encode("Domain", utf16le.MapCharsNone)
 	ntlmv2Hash, err := hex.DecodeString("0c868a403bfd7a93a3001ef22ef02e3f")
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +196,7 @@ func TestSeal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plainText := utf16le.EncodeStringToBytes("Plaintext")
+	plainText := utf16le.Encode("Plaintext", utf16le.MapCharsNone)
 	ret := make([]byte, len(plainText)+16)
 	clientHandle.XORKeyStream(ret[16:], plainText)
 	mac(ret[:0], NTLMSSP_NEGOTIATE_EXTENDED_SESSIONSECURITY|NTLMSSP_NEGOTIATE_KEY_EXCH, clientHandle, clientSignKey, seqNum, plainText)
@@ -212,38 +211,51 @@ func TestSeal(t *testing.T) {
 }
 
 func TestClientServer(t *testing.T) {
-	c := &Client{
-		User:     "user",
-		Password: "password",
+	tests := []struct {
+		name string
+		user string
+		pass string
+	}{
+		{"authenticated", "user", "password"},
+		{"anonymous", "", ""},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := &Client{
+				User:     tt.user,
+				Password: tt.pass,
+			}
 
-	s := NewServer("server")
+			s := NewServer("server")
+			if tt.user != "" {
+				s.AddAccount("user", "password")
+			}
 
-	s.AddAccount("user", "password")
+			nmsg, err := c.Negotiate()
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	nmsg, err := c.Negotiate()
-	if err != nil {
-		t.Fatal(err)
-	}
+			cmsg, err := s.Challenge(nmsg)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	cmsg, err := s.Challenge(nmsg)
-	if err != nil {
-		t.Fatal(err)
-	}
+			amsg, err := c.Authenticate(cmsg)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	amsg, err := c.Authenticate(cmsg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = s.Authenticate(amsg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.Session() == nil {
-		t.Error("error")
-	}
-	if s.Session() == nil {
-		t.Error("error")
+			err = s.Authenticate(amsg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Session() == nil {
+				t.Error("error")
+			}
+			if s.Session() == nil {
+				t.Error("error")
+			}
+		})
 	}
 }

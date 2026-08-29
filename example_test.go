@@ -1,21 +1,14 @@
 package smb2_test
 
 import (
+	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"net"
 
 	"github.com/antimatter-studios/go-smb2-hirochachacha"
 )
 
 func Example() {
-	conn, err := net.Dial("tcp", "localhost:445")
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close()
-
 	d := &smb2.Dialer{
 		Initiator: &smb2.NTLMInitiator{
 			User:     "Guest",
@@ -24,24 +17,30 @@ func Example() {
 		},
 	}
 
-	c, err := d.Dial(conn)
+	c, err := d.Dial(context.Background(), "localhost:445")
 	if err != nil {
 		panic(err)
 	}
-	defer c.Logoff()
+	defer func() {
+		_ = c.Logoff()
+	}()
 
 	fs, err := c.Mount(`\\localhost\share`)
 	if err != nil {
 		panic(err)
 	}
-	defer fs.Umount()
+	defer func() {
+		_ = fs.Umount()
+	}()
 
 	f, err := fs.Create("hello.txt")
 	if err != nil {
 		panic(err)
 	}
-	defer fs.Remove("hello.txt")
-	defer f.Close()
+	defer func() {
+		f.Close()
+		_ = fs.Remove("hello.txt")
+	}()
 
 	_, err = f.Write([]byte("Hello world!"))
 	if err != nil {
@@ -53,7 +52,7 @@ func Example() {
 		panic(err)
 	}
 
-	bs, err := ioutil.ReadAll(f)
+	bs, err := io.ReadAll(f)
 	if err != nil {
 		panic(err)
 	}

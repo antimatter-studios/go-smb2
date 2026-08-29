@@ -76,7 +76,7 @@ func (s *Server) Challenge(nmsg []byte) (cmsg []byte, err error) {
 		off += 8
 	}
 
-	targetName := utf16le.EncodeStringToBytes(s.targetName)
+	targetName := utf16le.Encode(s.targetName, utf16le.MapCharsNone)
 
 	cmsg = make([]byte, off+len(targetName)+4)
 
@@ -97,6 +97,7 @@ func (s *Server) Challenge(nmsg []byte) (cmsg []byte, err error) {
 		le.PutUint16(cmsg[40:42], uint16(len))
 		le.PutUint16(cmsg[42:44], uint16(len))
 		le.PutUint32(cmsg[44:48], uint32(off))
+		//nolint:ineffassign // we know that this does nothing, it will be removed in a later cleanup
 		off += len
 	}
 
@@ -187,13 +188,14 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 	}
 	encryptedRandomSessionKey := amsg[encryptedRandomSessionKeyBufferOffset : encryptedRandomSessionKeyBufferOffset+uint32(encryptedRandomSessionKeyLen)] // amsg.EncryptedRandomSessionKey
 
+	user := utf16le.Decode(userName, utf16le.MapCharsNone)
+	USER := utf16le.Encode(strings.ToUpper(user), utf16le.MapCharsNone)
+	password := utf16le.Encode(s.accounts[user], utf16le.MapCharsNone)
+	h := hmac.New(md5.New, ntowfv2(USER, password, domainName))
+
 	if len(userName) != 0 || len(ntChallengeResponse) != 0 {
-		user := utf16le.DecodeToString(userName)
 		expectedNtChallengeResponse := make([]byte, len(ntChallengeResponse))
 		ntlmv2ClientChallenge := ntChallengeResponse[16:]
-		USER := utf16le.EncodeStringToBytes(strings.ToUpper(user))
-		password := utf16le.EncodeStringToBytes(s.accounts[user])
-		h := hmac.New(md5.New, ntowfv2(USER, password, domainName))
 		serverChallenge := s.cmsg[24:32]
 		timeStamp := ntlmv2ClientChallenge[8:16]
 		clientChallenge := ntlmv2ClientChallenge[16:24]
@@ -202,72 +204,72 @@ func (s *Server) Authenticate(amsg []byte) (err error) {
 		if !bytes.Equal(ntChallengeResponse, expectedNtChallengeResponse) {
 			return errors.New("login failure")
 		}
-
-		session := new(Session)
-
-		session.isClientSide = false
-
-		session.user = user
-		session.negotiateFlags = flags
-
 		h.Reset()
 		h.Write(ntChallengeResponse[:16])
-		sessionBaseKey := h.Sum(nil)
-
-		keyExchangeKey := sessionBaseKey // if ntlm version == 2
-
-		if flags&NTLMSSP_NEGOTIATE_KEY_EXCH != 0 {
-			session.exportedSessionKey = make([]byte, 16)
-			cipher, err := rc4.NewCipher(keyExchangeKey)
-			if err != nil {
-				return err
-			}
-			cipher.XORKeyStream(session.exportedSessionKey, encryptedRandomSessionKey)
-		} else {
-			session.exportedSessionKey = keyExchangeKey
-		}
-
-		if infoMap, ok := parseAvPairs(targetInfo); ok {
-			if avFlags, ok := infoMap[MsvAvFlags]; ok && le.Uint32(avFlags)&0x02 != 0 {
-				MIC := make([]byte, 16)
-				if flags&NTLMSSP_NEGOTIATE_VERSION != 0 {
-					copy(MIC, amsg[72:88])
-					copy(amsg[72:88], zero[:])
-				} else {
-					copy(MIC, amsg[64:80])
-					copy(amsg[64:80], zero[:])
-				}
-				h = hmac.New(md5.New, session.exportedSessionKey)
-				h.Write(s.nmsg)
-				h.Write(s.cmsg)
-				h.Write(amsg)
-				if !bytes.Equal(MIC, h.Sum(nil)) {
-					return errors.New("login failure")
-				}
-			}
-		}
-
-		{
-			session.clientSigningKey = signKey(flags, session.exportedSessionKey, true)
-			session.serverSigningKey = signKey(flags, session.exportedSessionKey, false)
-
-			session.clientHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, true))
-			if err != nil {
-				return err
-			}
-
-			session.serverHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, false))
-			if err != nil {
-				return err
-			}
-		}
-
-		s.session = session
-
-		return nil
 	}
 
-	return errors.New("credential is empty")
+	sessionBaseKey := h.Sum(nil)
+
+	keyExchangeKey := sessionBaseKey // if ntlm version == 2
+
+	if len(userName) == 0 {
+		keyExchangeKey = anonymousKeyExchangeKey
+	}
+
+	session := new(Session)
+
+	session.isClientSide = false
+
+	session.user = user
+	session.negotiateFlags = flags
+
+	if flags&NTLMSSP_NEGOTIATE_KEY_EXCH != 0 {
+		session.exportedSessionKey = make([]byte, 16)
+		cipher, err := rc4.NewCipher(keyExchangeKey)
+		if err != nil {
+			return err
+		}
+		cipher.XORKeyStream(session.exportedSessionKey, encryptedRandomSessionKey)
+	} else {
+		session.exportedSessionKey = keyExchangeKey
+	}
+
+	MIC := make([]byte, 16)
+	if flags&NTLMSSP_NEGOTIATE_VERSION != 0 {
+		copy(MIC, amsg[72:88])
+		copy(amsg[72:88], zero[:])
+	} else {
+		copy(MIC, amsg[64:80])
+		copy(amsg[64:80], zero[:])
+	}
+	h = hmac.New(md5.New, session.exportedSessionKey)
+	h.Write(s.nmsg)
+	h.Write(s.cmsg)
+	h.Write(amsg)
+	if !bytes.Equal(MIC, h.Sum(nil)) {
+		return errors.New("login failure")
+	}
+
+	{
+		session.clientSigningKey = signKey(flags, session.exportedSessionKey, true)
+		session.serverSigningKey = signKey(flags, session.exportedSessionKey, false)
+
+		session.clientHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, true))
+		if err != nil {
+			return err
+		}
+
+		session.serverHandle, err = rc4.NewCipher(sealKey(flags, session.exportedSessionKey, false))
+		if err != nil {
+			return err
+		}
+	}
+
+	s.session = session
+
+	return nil
+
+	//return errors.New("credential is empty")
 }
 
 func (s *Server) Session() *Session {

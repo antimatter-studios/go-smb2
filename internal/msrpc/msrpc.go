@@ -68,11 +68,11 @@ func (r *Bind) Encode(b []byte) {
 	le.PutUint16(b[28:30], 0)        // ctx item[1] .context id
 	le.PutUint16(b[30:32], 1)        // ctx item[1] .num trans items
 
-	hex.Decode(b[32:48], SRVSVC_UUID)
+	_, _ = hex.Decode(b[32:48], SRVSVC_UUID)
 	le.PutUint16(b[48:50], SRVSVC_VERSION)
 	le.PutUint16(b[50:52], SRVSVC_VERSION_MINOR)
 
-	hex.Decode(b[52:68], NDR_UUID)
+	_, _ = hex.Decode(b[52:68], NDR_UUID)
 	le.PutUint32(b[68:72], NDR_VERSION)
 }
 
@@ -181,7 +181,7 @@ func (r *NetShareEnumAllRequest) Encode(b []byte) {
 	le.PutUint32(b[32:36], 0)             // offset
 	le.PutUint32(b[36:40], uint32(count)) // actual count
 
-	utf16le.EncodeString(b[40:], r.ServerName) // server unc
+	utf16le.EncodeSlice(b[40:], r.ServerName, utf16le.MapCharsNone) // server unc
 
 	off := 40 + count*2
 	off = roundup(off, 4)
@@ -291,7 +291,7 @@ func (c NetShareEnumAllResponseDecoder) IsIncomplete() bool {
 			return true
 		}
 
-		for i := 0; i < count; i++ {
+		for range count {
 			if len(c) < offset+12 {
 				return true
 			}
@@ -310,7 +310,7 @@ func (c NetShareEnumAllResponseDecoder) IsIncomplete() bool {
 			return true
 		}
 
-		for i := 0; i < count; i++ {
+		for range count {
 			{ // name
 				if len(c) < offset+12 {
 					return true
@@ -361,22 +361,22 @@ func (c NetShareEnumAllResponseDecoder) ShareNameList() []string {
 	switch level {
 	case 0:
 		offset := 48 + count*4 // name pointer
-		for i := 0; i < count; i++ {
+		for i := range count {
 			noff := int(le.Uint32(c[offset+4 : offset+8]))    // offset
 			nlen := int(le.Uint32(c[offset+8:offset+12])) * 2 // actual count
 
-			ss[i] = utf16le.DecodeToString(c[offset+12+noff : offset+12+noff+nlen])
+			ss[i] = utf16le.Decode(c[offset+12+noff:offset+12+noff+nlen], utf16le.MapCharsNone)
 
 			offset = roundup(offset+12+noff+nlen, 4)
 		}
 	case 1:
 		offset := 48 + count*12
-		for i := 0; i < count; i++ {
+		for i := range count {
 			{ // name
 				noff := int(le.Uint32(c[offset+4 : offset+8]))    // offset
 				nlen := int(le.Uint32(c[offset+8:offset+12])) * 2 // actual count
 
-				ss[i] = utf16le.DecodeToString(c[offset+12+noff : offset+12+noff+nlen])
+				ss[i] = utf16le.Decode(c[offset+12+noff:offset+12+noff+nlen], utf16le.MapCharsNone)
 
 				offset = roundup(offset+12+noff+nlen, 4)
 			}

@@ -25,11 +25,11 @@ func (a *account) initRequest() uint16 {
 	return uint16(cap(a.balance) - len(a.balance))
 }
 
-func (a *account) loan(creditCharge uint16, ctx context.Context) (uint16, bool, error) {
+func (a *account) borrow(ctx context.Context, creditCharge uint16) (uint16, bool, error) {
 	select {
 	case <-a.balance:
 	case <-ctx.Done():
-		return 0, false, &ContextError{Err: ctx.Err()}
+		return 0, false, ctx.Err()
 	}
 
 	for i := uint16(1); i < creditCharge; i++ {
@@ -54,7 +54,7 @@ func (a *account) opening() uint16 {
 	return ret
 }
 
-func (a *account) charge(granted, requested uint16) {
+func (a *account) settle(granted, requested uint16) {
 	if granted == 0 && requested == 0 {
 		return
 	}
@@ -67,7 +67,7 @@ func (a *account) charge(granted, requested uint16) {
 
 	a.m.Unlock()
 
-	for i := uint16(0); i < granted; i++ {
+	for range granted {
 		select {
 		case a.balance <- struct{}{}:
 		default:

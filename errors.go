@@ -1,11 +1,17 @@
 package smb2
 
 import (
-	"context"
+	"errors"
 	"fmt"
+	"os"
 
-	. "github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
 )
+
+// status errors - add more if necessary
+
+// ErrRequestNotAccepted happens when the host cannot accept more connections.
+var ErrRequestNotAccepted = errors.New(erref.STATUS_REQUEST_NOT_ACCEPTED.Error())
 
 // TransportError represents a error come from net.Conn layer.
 type TransportError struct {
@@ -43,18 +49,14 @@ type ResponseError struct {
 }
 
 func (err *ResponseError) Error() string {
-	return fmt.Sprintf("response error: %v", NtStatus(err.Code))
+	return fmt.Sprintf("response error: %v", erref.NtStatus(err.Code))
 }
 
-// ContextError wraps a context error to support os.IsTimeout function.
-type ContextError struct {
-	Err error
-}
-
-func (err *ContextError) Timeout() bool {
-	return err.Err == context.DeadlineExceeded
-}
-
-func (err *ContextError) Error() string {
-	return err.Err.Error()
+// isFileDeleted reports whether err indicates a file was deleted or is pending
+// deletion. This is used to silently skip directory entries that vanish between
+// Readdir and a subsequent compound security query.
+func isFileDeleted(err error) bool {
+	var re *ResponseError
+	return errors.Is(err, os.ErrNotExist) ||
+		(errors.As(err, &re) && re.Code == uint32(erref.STATUS_DELETE_PENDING))
 }

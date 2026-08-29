@@ -1,6 +1,3 @@
-//go:build go1.16
-// +build go1.16
-
 package smb2_test
 
 import (
@@ -22,7 +19,9 @@ func TestDirFS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	err = fs.WriteFile(path.Join(testDir, "hello.txt"), []byte("hello world!"), 0666)
 	if err != nil {
@@ -40,7 +39,7 @@ func TestDirFS(t *testing.T) {
 	{
 		var entries []string
 
-		iofs.WalkDir(fs.DirFS(testDir), ".", func(path string, d iofs.DirEntry, err error) error {
+		_ = iofs.WalkDir(fs.DirFS(testDir), ".", func(path string, d iofs.DirEntry, err error) error {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -58,7 +57,7 @@ func TestDirFS(t *testing.T) {
 	{
 		var entries []string
 
-		iofs.WalkDir(fs.DirFS(testDir), "hello", func(path string, d iofs.DirEntry, err error) error {
+		_ = iofs.WalkDir(fs.DirFS(testDir), "hello", func(path string, d iofs.DirEntry, err error) error {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +83,9 @@ func TestGlobFS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fs.RemoveAll(testDir)
+	defer func() {
+		_ = fs.RemoveAll(testDir)
+	}()
 
 	err = fs.WriteFile(path.Join(testDir, "hello.txt"), []byte("hello world!"), 0666)
 	if err != nil {

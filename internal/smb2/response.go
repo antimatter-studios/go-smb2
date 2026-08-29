@@ -50,7 +50,7 @@ func (r ErrorResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if uint32(len(r)) < 8+r.ByteCount() {
+	if uint64(len(r)) < 8+uint64(r.ByteCount()) {
 		return true
 	}
 
@@ -126,7 +126,7 @@ func (ctx ErrorContextResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if uint32(len(ctx)) < 8+ctx.ErrorDataLength() {
+	if uint64(len(ctx)) < 8+uint64(ctx.ErrorDataLength()) {
 		return true
 	}
 
@@ -180,6 +180,7 @@ type SymbolicLinkErrorResponse struct {
 	Flags              uint32
 	SubstituteName     string
 	PrintName          string
+	Mapping            utf16le.MapChars
 }
 
 func (c *SymbolicLinkErrorResponse) Size() int {
@@ -187,11 +188,11 @@ func (c *SymbolicLinkErrorResponse) Size() int {
 }
 
 func (c *SymbolicLinkErrorResponse) Encode(p []byte) {
-	slen := utf16le.EncodeString(p[24:], c.SubstituteName)
-	plen := utf16le.EncodeString(p[24+slen:], c.PrintName)
+	slen := utf16le.EncodeSlice(p[24:], c.SubstituteName, c.Mapping)
+	plen := utf16le.EncodeSlice(p[24+slen:], c.PrintName, c.Mapping)
 
 	le.PutUint32(p[:4], uint32(len(p)-4)) // SymLinkLength
-	le.PutUint32(p[4:8], 0x4c4d5953)
+	le.PutUint32(p[4:8], 0x4c4d5953)      // in ASCII: LMYS (SYML)
 	le.PutUint32(p[8:12], IO_REPARSE_TAG_SYMLINK)
 	le.PutUint16(p[14:16], c.UnparsedPathLength)
 	le.PutUint32(p[24:28], c.Flags)
@@ -287,16 +288,16 @@ func (r SymbolicLinkErrorResponseDecoder) PathBuffer() []byte {
 	return r[28:]
 }
 
-func (r SymbolicLinkErrorResponseDecoder) SubstituteName() string {
+func (r SymbolicLinkErrorResponseDecoder) SubstituteName(mc utf16le.MapChars) string {
 	off := r.SubstituteNameOffset()
 	len := r.SubstituteNameLength()
-	return utf16le.DecodeToString(r.PathBuffer()[off : off+len])
+	return utf16le.Decode(r.PathBuffer()[off:off+len], mc)
 }
 
-func (r SymbolicLinkErrorResponseDecoder) PrintName() string {
+func (r SymbolicLinkErrorResponseDecoder) PrintName(mc utf16le.MapChars) string {
 	off := r.PrintNameOffset()
 	len := r.PrintNameLength()
-	return utf16le.DecodeToString(r.PathBuffer()[off : off+len])
+	return utf16le.Decode(r.PathBuffer()[off:off+len], mc)
 }
 
 func (r SymbolicLinkErrorResponseDecoder) SplitUnparsedPath(name string) (string, string) {
@@ -401,7 +402,7 @@ func (r NegotiateResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(r.SecurityBufferOffset()+r.SecurityBufferLength())-64 {
+	if uint64(len(r))+64 < uint64(r.SecurityBufferOffset())+uint64(r.SecurityBufferLength()) {
 		return true
 	}
 
@@ -412,7 +413,7 @@ func (r NegotiateResponseDecoder) IsInvalid() bool {
 			return true
 		}
 
-		if len(r) < int(noff)-64 {
+		if noff < 64 || uint64(len(r))+64 < uint64(noff) {
 			return true
 		}
 	}
@@ -551,7 +552,7 @@ func (r SessionSetupResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(r.SecurityBufferOffset()+r.SecurityBufferLength())-64 {
+	if uint64(len(r))+64 < uint64(r.SecurityBufferOffset())+uint64(r.SecurityBufferLength()) {
 		return true
 	}
 
@@ -631,9 +632,52 @@ func (r LogoffResponseDecoder) StructureSize() uint16 {
 }
 
 // ----------------------------------------------------------------------------
+// SMB2 ECHO Response
+//
+
+type EchoResponse struct {
+	PacketHeader
+}
+
+func (c *EchoResponse) Header() *PacketHeader {
+	return &c.PacketHeader
+}
+
+func (c *EchoResponse) Size() int {
+	return 64 + 4
+}
+
+func (c *EchoResponse) Encode(pkt []byte) {
+	c.Command = SMB2_ECHO
+	c.encodeHeader(pkt)
+
+	res := pkt[64:]
+	le.PutUint16(res[:2], 4) // StructureSize
+}
+
+type EchoResponseDecoder []byte
+
+func (r EchoResponseDecoder) IsInvalid() bool {
+	if len(r) < 4 {
+		return true
+	}
+
+	if r.StructureSize() != 4 {
+		return true
+	}
+
+	return false
+}
+
+func (r EchoResponseDecoder) StructureSize() uint16 {
+	return le.Uint16(r[:2])
+}
+
+// ----------------------------------------------------------------------------
 // SMB2 TREE_CONNECT Response
 //
 
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/dd34e26c-a75e-47fa-aab2-6efc27502e96
 type TreeConnectResponse struct {
 	PacketHeader
 
@@ -841,7 +885,7 @@ func (r CreateResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(coff+r.CreateContextsLength())-64 {
+	if uint64(len(r))+64 < uint64(coff)+uint64(r.CreateContextsLength()) {
 		return true
 	}
 
@@ -1096,7 +1140,7 @@ func (r ReadResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(uint32(r.DataOffset())+r.DataLength())-64 {
+	if uint64(len(r))+64 < uint64(r.DataOffset())+uint64(r.DataLength()) {
 		return true
 	}
 
@@ -1273,11 +1317,11 @@ func (r IoctlResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(r.InputOffset()+r.InputCount())-64 {
+	if uint64(len(r))+64 < uint64(r.InputOffset())+uint64(r.InputCount()) {
 		return true
 	}
 
-	if len(r) < int(r.OutputOffset()+r.OutputCount())-64 {
+	if uint64(len(r))+64 < uint64(r.OutputOffset())+uint64(r.OutputCount()) {
 		return true
 	}
 
@@ -1388,7 +1432,7 @@ func (r QueryDirectoryResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(uint32(r.OutputBufferOffset())+r.OutputBufferLength())-64 {
+	if uint64(len(r))+64 < uint64(r.OutputBufferOffset())+uint64(r.OutputBufferLength()) {
 		return true
 	}
 
@@ -1473,7 +1517,7 @@ func (r QueryInfoResponseDecoder) IsInvalid() bool {
 		return true
 	}
 
-	if len(r) < int(uint32(r.OutputBufferOffset())+r.OutputBufferLength())-64 {
+	if uint64(len(r))+64 < uint64(r.OutputBufferOffset())+uint64(r.OutputBufferLength()) {
 		return true
 	}
 

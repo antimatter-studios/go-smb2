@@ -43,6 +43,7 @@ type SymbolicLinkReparseDataBuffer struct {
 	Flags          uint32
 	SubstituteName string
 	PrintName      string
+	Mapping        utf16le.MapChars
 }
 
 func (c *SymbolicLinkReparseDataBuffer) Size() int {
@@ -50,8 +51,8 @@ func (c *SymbolicLinkReparseDataBuffer) Size() int {
 }
 
 func (c *SymbolicLinkReparseDataBuffer) Encode(p []byte) {
-	slen := utf16le.EncodeString(p[20:], c.SubstituteName)
-	plen := utf16le.EncodeString(p[20+slen:], c.PrintName)
+	slen := utf16le.EncodeSlice(p[20:], c.SubstituteName, c.Mapping)
+	plen := utf16le.EncodeSlice(p[20+slen:], c.PrintName, c.Mapping)
 
 	le.PutUint32(p[:4], IO_REPARSE_TAG_SYMLINK)
 	le.PutUint16(p[4:6], uint16(len(p)-8)) // ReparseDataLength
@@ -126,27 +127,21 @@ func (c SymbolicLinkReparseDataBufferDecoder) PathBuffer() []byte {
 	return c[20:]
 }
 
-func (c SymbolicLinkReparseDataBufferDecoder) SubstituteName() string {
+func (c SymbolicLinkReparseDataBufferDecoder) SubstituteName(mc utf16le.MapChars) string {
 	off := c.SubstituteNameOffset()
 	len := c.SubstituteNameLength()
-	return utf16le.DecodeToString(c.PathBuffer()[off : off+len])
+	return utf16le.Decode(c.PathBuffer()[off:off+len], mc)
 }
 
-func (c SymbolicLinkReparseDataBufferDecoder) PrintName() string {
+func (c SymbolicLinkReparseDataBufferDecoder) PrintName(mc utf16le.MapChars) string {
 	off := c.PrintNameOffset()
 	len := c.PrintNameLength()
-	return utf16le.DecodeToString(c.PathBuffer()[off : off+len])
+	return utf16le.Decode(c.PathBuffer()[off:off+len], mc)
 }
 
 type SrvRequestResumeKeyResponseDecoder []byte
 
 func (c SrvRequestResumeKeyResponseDecoder) IsInvalid() bool {
-	// ContextLength reads c[24:28], so the fixed part has to be there before
-	// the variable part can be measured.
-	if len(c) < 28 {
-		return true
-	}
-
 	return uint64(len(c)) < 28+uint64(c.ContextLength())
 }
 
@@ -232,8 +227,9 @@ const (
 	FILE_ATTRIBUTE_NO_SCRUB_DATA       = 0x20000
 )
 
+// https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/4718fc40-e539-4014-8e33-b675af74e3e1
 const (
-	FileDirectoryInformation           = 1 + iota // 1
+	FileDirectoryInformation           = 1 + iota // 1 https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/b38bf518-9057-4c88-9ddd-5e2d3976a64b
 	FileFullDirectoryInformation                  // 2
 	FileBothDirectoryInformation                  // 3
 	FileBasicInformation                          // 4
@@ -242,7 +238,7 @@ const (
 	FileEaInformation                             // 7
 	FileAccessInformation                         // 8
 	FileNameInformation                           // 9
-	FileRenameInformation                         // 10
+	FileRenameInformation                         // 10 https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/1d2673a8-8fb9-4868-920a-775ccaa30cf8
 	FileLinkInformation                           // 11
 	FileNamesInformation                          // 12
 	FileDispositionInformation                    // 13
@@ -305,24 +301,7 @@ const (
 
 type FileDirectoryInformationDecoder []byte
 
-// Widened to uint64 before the addition, not after.
-//
-// The length is supplied by the server. Adding a constant to it in
-// uint32 wraps: a FileNameLength of 0xFFFFFFFF made 64+len come to 63,
-// the comparison passed, and the decoder went on to slice the buffer by
-// a length this function had just failed to reject — an out-of-bounds
-// read, from a directory listing, against any server willing to send it.
-//
-// On a 64-bit platform the window is 0xFFFFFFC0 upwards, where the
-// uint32 sum itself wraps. On a 32-bit one it is far wider, because int
-// is 32 bits there and the conversion overflows too.
 func (c FileDirectoryInformationDecoder) IsInvalid() bool {
-	// FileNameLength reads c[60:64], so the fixed part has to be there before
-	// the variable part can be measured.
-	if len(c) < 64 {
-		return true
-	}
-
 	return uint64(len(c)) < 64+uint64(c.FileNameLength())
 }
 
@@ -366,14 +345,108 @@ func (c FileDirectoryInformationDecoder) FileNameLength() uint32 {
 	return le.Uint32(c[60:64])
 }
 
-func (c FileDirectoryInformationDecoder) FileName() string {
-	return utf16le.DecodeToString(c[64 : 64+c.FileNameLength()])
+func (c FileDirectoryInformationDecoder) FileName(mc utf16le.MapChars) string {
+	return utf16le.Decode(c[64:64+c.FileNameLength()], mc)
+}
+
+// FileIdBothDirectoryInformationDecoder decodes a FILE_ID_BOTH_DIR_INFORMATION
+// entry (MS-FSCC 2.4.22, FileIdBothDirectoryInformation). Its first 64 bytes
+// are laid out identically to FILE_DIRECTORY_INFORMATION; the trailing fields
+// add the short name and the server's 64-bit file reference number.
+type FileIdBothDirectoryInformationDecoder []byte
+
+func (c FileIdBothDirectoryInformationDecoder) IsInvalid() bool {
+	if len(c) < 104 {
+		return true
+	}
+	return uint64(len(c)) < 104+uint64(c.FileNameLength())
+}
+
+func (c FileIdBothDirectoryInformationDecoder) NextEntryOffset() uint32 {
+	return le.Uint32(c[:4])
+}
+
+// FileIndex is the resume cookie for restarting enumeration, not a file
+// identifier; it is commonly 0. See FileId for the file reference number.
+func (c FileIdBothDirectoryInformationDecoder) FileIndex() uint32 {
+	return le.Uint32(c[4:8])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) CreationTime() FiletimeDecoder {
+	return FiletimeDecoder(c[8:16])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) LastAccessTime() FiletimeDecoder {
+	return FiletimeDecoder(c[16:24])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) LastWriteTime() FiletimeDecoder {
+	return FiletimeDecoder(c[24:32])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) ChangeTime() FiletimeDecoder {
+	return FiletimeDecoder(c[32:40])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) EndOfFile() int64 {
+	return int64(le.Uint64(c[40:48]))
+}
+
+func (c FileIdBothDirectoryInformationDecoder) AllocationSize() int64 {
+	return int64(le.Uint64(c[48:56]))
+}
+
+func (c FileIdBothDirectoryInformationDecoder) FileAttributes() uint32 {
+	return le.Uint32(c[56:60])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) FileNameLength() uint32 {
+	return le.Uint32(c[60:64])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) EaSize() uint32 {
+	return le.Uint32(c[64:68])
+}
+
+// ReparsePointTag is the reparse tag (IO_REPARSE_TAG_*) of the entry, or 0 when
+// it is not a reparse point.
+//
+// MS-FSCC 2.4.22 overloads the EaSize field: when FILE_ATTRIBUTE_REPARSE_POINT
+// is set in FileAttributes, the field holds a reparse tag (MS-FSCC 2.1.2.1)
+// instead of the extended-attribute size. This is the same union FindFirstFile
+// exposes as WIN32_FIND_DATA.dwReserved0.
+func (c FileIdBothDirectoryInformationDecoder) ReparsePointTag() uint32 {
+	if c.FileAttributes()&FILE_ATTRIBUTE_REPARSE_POINT == 0 {
+		return 0
+	}
+	return c.EaSize()
+}
+
+func (c FileIdBothDirectoryInformationDecoder) ShortNameLength() uint8 {
+	return c[68]
+}
+
+func (c FileIdBothDirectoryInformationDecoder) ShortName(mc utf16le.MapChars) string {
+	n := min(uint64(c.ShortNameLength()), 24)
+	return utf16le.Decode(c[70:70+n], mc)
+}
+
+// FileId is the server's 64-bit file reference number: the MFT record plus
+// sequence number on NTFS, the inode number on Samba. Servers that cannot
+// supply one report 0.
+func (c FileIdBothDirectoryInformationDecoder) FileId() uint64 {
+	return le.Uint64(c[96:104])
+}
+
+func (c FileIdBothDirectoryInformationDecoder) FileName(mc utf16le.MapChars) string {
+	return utf16le.Decode(c[104:104+c.FileNameLength()], mc)
 }
 
 type FileRenameInformationType2Encoder struct {
 	ReplaceIfExists uint8
 	RootDirectory   uint64
 	FileName        string
+	Mapping         utf16le.MapChars
 }
 
 func (c *FileRenameInformationType2Encoder) Size() int {
@@ -381,7 +454,7 @@ func (c *FileRenameInformationType2Encoder) Size() int {
 }
 
 func (c *FileRenameInformationType2Encoder) Encode(p []byte) {
-	flen := utf16le.EncodeString(p[20:], c.FileName)
+	flen := utf16le.EncodeSlice(p[20:], c.FileName, c.Mapping)
 
 	p[0] = c.ReplaceIfExists
 	le.PutUint64(p[8:16], c.RootDirectory)
@@ -392,6 +465,7 @@ type FileLinkInformationType2Encoder struct {
 	ReplaceIfExists uint8
 	RootDirectory   uint64
 	FileName        string
+	Mapping         utf16le.MapChars
 }
 
 func (c *FileLinkInformationType2Encoder) Size() int {
@@ -399,7 +473,7 @@ func (c *FileLinkInformationType2Encoder) Size() int {
 }
 
 func (c *FileLinkInformationType2Encoder) Encode(p []byte) {
-	flen := utf16le.EncodeString(p[20:], c.FileName)
+	flen := utf16le.EncodeSlice(p[20:], c.FileName, c.Mapping)
 
 	p[0] = c.ReplaceIfExists
 	le.PutUint64(p[8:16], c.RootDirectory)
@@ -411,7 +485,7 @@ type FileDispositionInformationEncoder struct {
 }
 
 func (c *FileDispositionInformationEncoder) Size() int {
-	return 4
+	return 1
 }
 
 func (c *FileDispositionInformationEncoder) Encode(p []byte) {
@@ -459,12 +533,6 @@ func (c FileFsFullSizeInformationDecoder) BytesPerSector() uint32 {
 type FileQuotaInformationDecoder []byte
 
 func (c FileQuotaInformationDecoder) IsInvalid() bool {
-	// SidLength reads c[4:8], so the fixed part has to be there before the
-	// variable part can be measured.
-	if len(c) < 40 {
-		return true
-	}
-
 	return uint64(len(c)) < 40+uint64(c.SidLength())
 }
 
@@ -718,6 +786,6 @@ func (c FileNameInformationDecoder) FileNameLength() uint32 {
 	return le.Uint32(c[:4])
 }
 
-func (c FileNameInformationDecoder) FileName() string {
-	return utf16le.DecodeToString(c[4 : 4+c.FileNameLength()])
+func (c FileNameInformationDecoder) FileName(mc utf16le.MapChars) string {
+	return utf16le.Decode(c[4:4+c.FileNameLength()], mc)
 }

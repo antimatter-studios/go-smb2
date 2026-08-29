@@ -6,7 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
-	"crypto/rand"
+
 	"crypto/sha256"
 	"crypto/sha512"
 	"fmt"
@@ -14,37 +14,36 @@ import (
 
 	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/crypto/ccm"
 	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/crypto/cmac"
-
-	. "github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
-	. "github.com/antimatter-studios/go-smb2-hirochachacha/internal/smb2"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/erref"
+	"github.com/antimatter-studios/go-smb2-hirochachacha/internal/smb2"
 )
 
-func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error) {
+func sessionSetup(ctx context.Context, conn *conn, i Initiator) (*session, error) {
 	spnego := newSpnegoClient([]Initiator{i})
 
-	outputToken, err := spnego.initSecContext()
+	outputToken, err := spnego.InitSecContext()
 	if err != nil {
 		return nil, &InvalidResponseError{err.Error()}
 	}
 
-	req := &SessionSetupRequest{
+	req := &smb2.SessionSetupRequest{
 		Flags:             0,
-		Capabilities:      conn.capabilities & (SMB2_GLOBAL_CAP_DFS),
+		Capabilities:      conn.capabilities & (smb2.SMB2_GLOBAL_CAP_DFS),
 		Channel:           0,
 		SecurityBuffer:    outputToken,
 		PreviousSessionId: 0,
 	}
 
 	if conn.requireSigning {
-		req.SecurityMode = SMB2_NEGOTIATE_SIGNING_REQUIRED
+		req.SecurityMode = smb2.SMB2_NEGOTIATE_SIGNING_REQUIRED
 	} else {
-		req.SecurityMode = SMB2_NEGOTIATE_SIGNING_ENABLED
+		req.SecurityMode = smb2.SMB2_NEGOTIATE_SIGNING_ENABLED
 	}
 
 	req.CreditCharge = 1
 	req.CreditRequestResponse = conn.account.initRequest()
 
-	rr, err := conn.send(req, ctx)
+	rr, err := conn.send(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -54,84 +53,88 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 		return nil, err
 	}
 
-	p := PacketCodec(pkt)
+	p := smb2.PacketCodec(pkt)
 
-	if NtStatus(p.Status()) != STATUS_MORE_PROCESSING_REQUIRED {
-		return nil, &InvalidResponseError{fmt.Sprintf("expected status: %v, got %v", STATUS_MORE_PROCESSING_REQUIRED, NtStatus(p.Status()))}
+	status := erref.NtStatus(p.Status())
+	if status != erref.STATUS_MORE_PROCESSING_REQUIRED && status != erref.STATUS_SUCCESS {
+		return nil, &InvalidResponseError{fmt.Sprintf("expected status: %v or %v, got %v", erref.STATUS_MORE_PROCESSING_REQUIRED, erref.STATUS_SUCCESS, erref.NtStatus(p.Status()))}
 	}
 
-	res, err := accept(SMB2_SESSION_SETUP, pkt)
+	res, err := accept(smb2.SMB2_SESSION_SETUP, pkt)
 	if err != nil {
 		return nil, err
 	}
 
-	r := SessionSetupResponseDecoder(res)
+	r := smb2.SessionSetupResponseDecoder(res)
 	if r.IsInvalid() {
 		return nil, &InvalidResponseError{"broken session setup response format"}
 	}
 
 	sessionFlags := r.SessionFlags()
 	if conn.requireSigning {
-		if sessionFlags&SMB2_SESSION_FLAG_IS_GUEST != 0 {
+		if sessionFlags&smb2.SMB2_SESSION_FLAG_IS_GUEST != 0 {
 			return nil, &InvalidResponseError{"guest account doesn't support signing"}
 		}
-		if sessionFlags&SMB2_SESSION_FLAG_IS_NULL != 0 {
+		if sessionFlags&smb2.SMB2_SESSION_FLAG_IS_NULL != 0 {
 			return nil, &InvalidResponseError{"anonymous account doesn't support signing"}
 		}
 	}
 
 	s := &session{
-		conn:           conn,
-		treeConnTables: make(map[uint32]*treeConn),
-		sessionFlags:   sessionFlags,
-		sessionId:      p.SessionId(),
+		conn:         conn,
+		sessionFlags: sessionFlags,
+		sessionId:    p.SessionId(),
 	}
 
 	switch conn.dialect {
-	case SMB311:
+	case smb2.SMB311:
 		s.preauthIntegrityHashValue = conn.preauthIntegrityHashValue
 
 		switch conn.preauthIntegrityHashId {
-		case SHA512:
+		case smb2.SHA512:
 			h := sha512.New()
 			h.Write(s.preauthIntegrityHashValue[:])
 			h.Write(rr.pkt)
 			h.Sum(s.preauthIntegrityHashValue[:0])
 
-			h.Reset()
-			h.Write(s.preauthIntegrityHashValue[:])
-			h.Write(pkt)
-			h.Sum(s.preauthIntegrityHashValue[:0])
+			if status == erref.STATUS_MORE_PROCESSING_REQUIRED {
+				h.Reset()
+				h.Write(s.preauthIntegrityHashValue[:])
+				h.Write(pkt)
+				h.Sum(s.preauthIntegrityHashValue[:0])
+			}
 		}
 
 	}
 
-	outputToken, err = spnego.acceptSecContext(r.SecurityBuffer())
+	outputToken, err = spnego.AcceptSecContext(r.SecurityBuffer())
 	if err != nil {
 		return nil, &InvalidResponseError{err.Error()}
 	}
 
-	req.SecurityBuffer = outputToken
-
-	req.CreditRequestResponse = 0
-
 	// We set session before sending packet just for setting hdr.SessionId.
 	// But, we should not permit access from receiver until the session information is completed.
-	conn.session = s
+	conn.session.Store(s)
 
-	rr, err = s.send(req, ctx)
-	if err != nil {
-		return nil, err
+	if status == erref.STATUS_MORE_PROCESSING_REQUIRED {
+		req.SecurityBuffer = outputToken
+
+		req.CreditRequestResponse = 0
+
+		rr, err = s.send(ctx, req)
+		if err != nil {
+			return nil, err
+		}
 	}
 
-	if s.sessionFlags&(SMB2_SESSION_FLAG_IS_GUEST|SMB2_SESSION_FLAG_IS_NULL) == 0 {
-		sessionKey := spnego.sessionKey()
+	if s.sessionFlags&(smb2.SMB2_SESSION_FLAG_IS_GUEST|smb2.SMB2_SESSION_FLAG_IS_NULL) == 0 {
+		sessionKey := spnego.SessionKey()
 
 		switch conn.dialect {
-		case SMB202, SMB210:
+		case smb2.SMB202, smb2.SMB210:
 			s.signer = hmac.New(sha256.New, sessionKey)
 			s.verifier = hmac.New(sha256.New, sessionKey)
-		case SMB300, SMB302:
+		case smb2.SMB300, smb2.SMB302:
 			signingKey := kdf(sessionKey, []byte("SMB2AESCMAC\x00"), []byte("SmbSign\x00"))
 			ciph, err := aes.NewCipher(signingKey)
 			if err != nil {
@@ -162,13 +165,15 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 			if err != nil {
 				return nil, &InternalError{err.Error()}
 			}
-		case SMB311:
-			switch conn.preauthIntegrityHashId {
-			case SHA512:
-				h := sha512.New()
-				h.Write(s.preauthIntegrityHashValue[:])
-				h.Write(rr.pkt)
-				h.Sum(s.preauthIntegrityHashValue[:0])
+		case smb2.SMB311:
+			if status == erref.STATUS_MORE_PROCESSING_REQUIRED {
+				switch conn.preauthIntegrityHashId {
+				case smb2.SHA512:
+					h := sha512.New()
+					h.Write(s.preauthIntegrityHashValue[:])
+					h.Write(rr.pkt)
+					h.Sum(s.preauthIntegrityHashValue[:0])
+				}
 			}
 
 			signingKey := kdf(sessionKey, []byte("SMBSigningKey\x00"), s.preauthIntegrityHashValue[:])
@@ -185,7 +190,7 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 			decryptionKey := kdf(sessionKey, []byte("SMBS2CCipherKey\x00"), s.preauthIntegrityHashValue[:])
 
 			switch s.cipherId {
-			case AES128CCM:
+			case smb2.AES128CCM:
 				ciph, err := aes.NewCipher(encryptionKey)
 				if err != nil {
 					return nil, &InternalError{err.Error()}
@@ -203,7 +208,7 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 				if err != nil {
 					return nil, &InternalError{err.Error()}
 				}
-			case AES128GCM:
+			case smb2.AES128GCM:
 				ciph, err := aes.NewCipher(encryptionKey)
 				if err != nil {
 					return nil, &InternalError{err.Error()}
@@ -225,36 +230,37 @@ func sessionSetup(conn *conn, i Initiator, ctx context.Context) (*session, error
 		}
 	}
 
-	pkt, err = s.recv(rr)
-	if err != nil {
-		return nil, err
-	}
+	if status == erref.STATUS_MORE_PROCESSING_REQUIRED {
+		pkt, err = s.recv(rr)
+		if err != nil {
+			return nil, err
+		}
 
-	res, err = accept(SMB2_SESSION_SETUP, pkt)
-	if err != nil {
-		return nil, err
-	}
+		res, err = accept(smb2.SMB2_SESSION_SETUP, pkt)
+		if err != nil {
+			return nil, err
+		}
 
-	r = SessionSetupResponseDecoder(res)
-	if r.IsInvalid() {
-		return nil, &InvalidResponseError{"broken session setup response format"}
-	}
+		r = smb2.SessionSetupResponseDecoder(res)
+		if r.IsInvalid() {
+			return nil, &InvalidResponseError{"broken session setup response format"}
+		}
 
-	if NtStatus(PacketCodec(pkt).Status()) != STATUS_SUCCESS {
-		return nil, &InvalidResponseError{"broken session setup response format"}
+		if erref.NtStatus(smb2.PacketCodec(pkt).Status()) != erref.STATUS_SUCCESS {
+			return nil, &InvalidResponseError{"broken session setup response format"}
+		}
 	}
 
 	s.sessionFlags = r.SessionFlags()
 
 	// now, allow access from receiver
-	s.enableSession()
+	s.useSession.Store(true)
 
 	return s, nil
 }
 
 type session struct {
 	*conn
-	treeConnTables            map[uint32]*treeConn
 	sessionFlags              uint16
 	sessionId                 uint64
 	preauthIntegrityHashValue [64]byte
@@ -264,27 +270,54 @@ type session struct {
 	encrypter cipher.AEAD
 	decrypter cipher.AEAD
 
+	encryptBuf []byte // reusable ciphertext buffer; safe because conn.m serializes access
+
 	// applicationKey []byte
 }
 
 func (s *session) logoff(ctx context.Context) error {
-	req := new(LogoffRequest)
+	// Release the transport and the receiver goroutine however the round trip
+	// turns out.
+	defer func() {
+		// rdone tells the receiver its impending read error is expected. The
+		// send is non-blocking to defend against multiple calls to logoff().
+		select {
+		case s.conn.rdone <- struct{}{}:
+		default:
+		}
+
+		s.conn.t.Close()
+	}()
+
+	req := new(smb2.LogoffRequest)
 
 	req.CreditCharge = 1
 
-	_, err := s.sendRecv(SMB2_LOGOFF, req, ctx)
+	_, err := s.sendRecv(ctx, smb2.SMB2_LOGOFF, req)
+
+	return err
+}
+
+func (s *session) echo(ctx context.Context) error {
+	req := new(smb2.EchoRequest)
+
+	req.CreditCharge = 1
+
+	res, err := s.sendRecv(ctx, smb2.SMB2_ECHO, req)
 	if err != nil {
 		return err
 	}
 
-	s.conn.rdone <- struct{}{}
-	s.conn.t.Close()
+	r := smb2.EchoResponseDecoder(res)
+	if r.IsInvalid() {
+		return &InvalidResponseError{"broken echo response format"}
+	}
 
 	return nil
 }
 
-func (s *session) sendRecv(cmd uint16, req Packet, ctx context.Context) (res []byte, err error) {
-	rr, err := s.send(req, ctx)
+func (s *session) sendRecv(ctx context.Context, cmd uint16, req smb2.Packet) (res []byte, err error) {
+	rr, err := s.send(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -302,16 +335,22 @@ func (s *session) recv(rr *requestResponse) (pkt []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if sessionId := PacketCodec(pkt).SessionId(); sessionId != s.sessionId {
+	// IBM i NetServer (iSeries/AS400) assigns the session ID only in the
+	// STATUS_MORE_PROCESSING_REQUIRED response, while the client's sessionId
+	// is still 0. Adopt the server's session ID in that case.
+	sessionId := smb2.PacketCodec(pkt).SessionId()
+	if s.sessionId == 0 {
+		s.sessionId = sessionId
+	} else if sessionId != s.sessionId {
 		return nil, &InvalidResponseError{fmt.Sprintf("expected session id: %v, got %v", s.sessionId, sessionId)}
 	}
 	return pkt, err
 }
 
 func (s *session) sign(pkt []byte) []byte {
-	p := PacketCodec(pkt)
+	p := smb2.PacketCodec(pkt)
 
-	p.SetFlags(p.Flags() | SMB2_FLAGS_SIGNED)
+	p.SetFlags(p.Flags() | smb2.SMB2_FLAGS_SIGNED)
 
 	h := s.signer
 
@@ -325,7 +364,7 @@ func (s *session) sign(pkt []byte) []byte {
 }
 
 func (s *session) verify(pkt []byte) (ok bool) {
-	p := PacketCodec(pkt)
+	p := smb2.PacketCodec(pkt)
 
 	signature := append([]byte{}, p.Signature()...)
 
@@ -342,25 +381,20 @@ func (s *session) verify(pkt []byte) (ok bool) {
 	return bytes.Equal(signature, p.Signature())
 }
 
-func (s *session) encrypt(pkt []byte) ([]byte, error) {
-	nonce := make([]byte, s.encrypter.NonceSize())
-
-	_, err := rand.Read(nonce)
-	if err != nil {
-		return nil, err
-	}
-
-	c := make([]byte, 52+len(pkt)+16)
-
-	t := TransformCodec(c)
+// encrypt encrypts pkt into c. len(c) must equal 52+len(pkt)+16.
+// Returns the wire-ready packet (c re-sliced to exclude the trailing tag).
+func (s *session) encrypt(pkt, c []byte) ([]byte, error) {
+	t := smb2.TransformCodec(c)
 
 	t.SetProtocolId()
-	t.SetNonce(nonce)
+	if err := t.GenerateNonce(s.encrypter.NonceSize()); err != nil {
+		return nil, err
+	}
 	t.SetOriginalMessageSize(uint32(len(pkt)))
-	t.SetFlags(Encrypted)
+	t.SetFlags(smb2.Encrypted)
 	t.SetSessionId(s.sessionId)
 
-	s.encrypter.Seal(c[:52], nonce, pkt, t.AssociatedData())
+	s.encrypter.Seal(c[:52], t.Nonce(s.encrypter.NonceSize()), pkt, t.AssociatedData())
 
 	t.SetSignature(c[len(c)-16:])
 
@@ -369,14 +403,19 @@ func (s *session) encrypt(pkt []byte) ([]byte, error) {
 	return c, nil
 }
 
-func (s *session) decrypt(pkt []byte) ([]byte, error) {
-	t := TransformCodec(pkt)
+// decrypt decrypts an SMB3 transform packet. c must be at least
+// len(EncryptedData)+len(Signature) bytes; decrypt copies the
+// ciphertext and tag into c and decrypts in-place.
+func (s *session) decrypt(pkt, c []byte) ([]byte, error) {
+	t := smb2.TransformCodec(pkt)
 
-	c := append(t.EncryptedData(), t.Signature()...)
+	c = c[:0]
+	c = append(c, t.EncryptedData()...)
+	c = append(c, t.Signature()...)
 
 	return s.decrypter.Open(
 		c[:0],
-		t.Nonce()[:s.decrypter.NonceSize()],
+		t.Nonce(s.decrypter.NonceSize()),
 		c,
 		t.AssociatedData(),
 	)
